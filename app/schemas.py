@@ -1,4 +1,6 @@
-from pydantic import BaseModel, EmailStr
+from pydantic import BaseModel, EmailStr, Field
+from datetime import datetime
+from typing import Optional
 
 class UserRegisterSchema(BaseModel):
     first_name: str
@@ -15,7 +17,12 @@ class UserResponse(BaseModel):
     first_name: str
     last_name: str
     email: EmailStr
-    is_verified: bool  # Include verification status in response
+    is_verified: bool
+    
+    # Subscription responses
+    subscription_status: str
+    trial_ends_at: datetime
+    subscription_ends_at: Optional[datetime] = None
     
     class Config:
         from_attributes = True
@@ -30,3 +37,23 @@ class RefreshRequestSchema(BaseModel):
 
 class ResendEmailSchema(BaseModel):
     email: EmailStr
+
+class VerifyEmailWithCodeSchema(BaseModel):
+    email: EmailStr
+    code: str
+
+class ResendVerificationSchema(BaseModel):
+    email: EmailStr
+
+class SocialAuthSchema(BaseModel):
+    id_token: str
+
+class TTSTextPayloadSchema(BaseModel):
+    text: str = Field(..., description="The text content you want to convert to speech")
+    voice: str = Field("en-US-GuyNeural", description="The Microsoft Edge TTS voice model name")
+
+class VoiceDetailSchema(BaseModel):
+    name: str
+    short_name: str
+    gender: str
+    locale: str

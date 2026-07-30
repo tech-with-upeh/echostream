@@ -1,17 +1,17 @@
-from pydantic_settings import BaseSettings, SettingsConfigDict
+import os
+from pathlib import Path
+from dotenv import load_dotenv
+from pydantic_settings import BaseSettings
 
-class Settings(BaseSettings):
-    DATABASE_URL: str
-    JWT_SECRET_KEY: str
-    ALGORITHM: str = "HS256"
-    ACCESS_TOKEN_EXPIRE_MINUTES: int = 15     # Shorter lifetime for access tokens
-    REFRESH_TOKEN_EXPIRE_DAYS: int = 7         # Longer lifetime for refresh tokens
+# 1. Force find your root folder dynamically from this file's position
+# app/config.py is inside 'app/', so .parent.parent gets the project root
+BASE_DIR = Path(__file__).resolve().parent.parent
+ENV_PATH = BASE_DIR / ".env"
 
-    model_config = SettingsConfigDict(env_file=".env", extra="ignore")
+# 2. Explicitly load the text variables into system memory using python-dotenv
+load_dotenv(dotenv_path=ENV_PATH)
 
-settings = Settings()
-from pydantic_settings import BaseSettings, SettingsConfigDict
-
+# 3. Let Pydantic comfortably extract and validate from system memory
 class Settings(BaseSettings):
     DATABASE_URL: str
     JWT_SECRET_KEY: str
@@ -30,6 +30,7 @@ class Settings(BaseSettings):
     
     FRONTEND_URL: str
 
-    model_config = SettingsConfigDict(env_file=".env", extra="ignore")
-
+    GOOGLE_CLIENT_ID: str
+    # Cleaned up: No more messy relative string paths needed here!
 settings = Settings()
+

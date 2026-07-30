@@ -4,3 +4,8 @@ bcrypt
 sqlalchemy
 psycopg2-binary
 pydantic-settings
+fastapi-mail
+google-auth
+edge-tts
+
+

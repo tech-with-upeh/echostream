@@ -2,6 +2,7 @@ from datetime import datetime, timedelta, timezone
 import bcrypt
 import jwt
 from app.config import settings
+import secrets
 
 # Keep password and token helpers intact...
 def get_password_hash(password: str) -> str:
@@ -31,3 +32,7 @@ def create_verification_token(email: str) -> str:
     expire = datetime.now(timezone.utc) + timedelta(hours=2)
     to_encode = {"sub": email, "type": "verification", "exp": expire}
     return jwt.encode(to_encode, settings.JWT_SECRET_KEY, algorithm=settings.ALGORITHM)
+
+def generate_numeric_otp(length: int = 6) -> str:
+    """Generates a cryptographically secure numeric string of specified length."""
+    return "".join(secrets.choice("0123456789") for _ in range(length))
