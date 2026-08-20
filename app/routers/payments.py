@@ -5,6 +5,7 @@ from datetime import datetime, timezone
 from fastapi import APIRouter, Depends, HTTPException, Request, status
 from sqlalchemy.orm import Session
 
+from app.config import settings
 from app.dependencies import get_current_user, get_db
 from app.models import DBSubscription, DBUser
 from app.paystack_service import (
@@ -17,7 +18,6 @@ from app.paystack_service import (
 )
 
 router = APIRouter(prefix="/payments", tags=["Payments"])
-
 VALID_PLANS = {"starter", "essential", "pro"}
 
 
@@ -26,7 +26,7 @@ def now_utc() -> datetime:
 
 
 def apply_subscription_event(db: Session, event: str, data: dict) -> None:
-    subscription_code = data.get("subscription_code") or data.get("subscription_code")
+    subscription_code = data.get("subscription_code")
     customer = data.get("customer") or {}
     customer_code = customer.get("customer_code") if isinstance(customer, dict) else None
     metadata = data.get("metadata") or {}
@@ -39,9 +39,12 @@ def apply_subscription_event(db: Session, event: str, data: dict) -> None:
         ).first()
 
     if not subscription and user_id:
-        subscription = db.query(DBSubscription).filter(
-            DBSubscription.user_id == int(user_id)
-        ).first()
+        try:
+            subscription = db.query(DBSubscription).filter(
+                DBSubscription.user_id == int(user_id)
+            ).first()
+        except (TypeError, ValueError):
+            subscription = None
 
     if not subscription:
         return
@@ -66,7 +69,6 @@ def apply_subscription_event(db: Session, event: str, data: dict) -> None:
     if new_status == "active":
         user.subscription_status = "active"
     elif new_status in {"canceled", "non_renewing"}:
-        # Keep paid access until the already-paid period ends when possible.
         if subscription.current_period_end and subscription.current_period_end > now_utc():
             user.subscription_status = "active"
         else:
@@ -85,22 +87,23 @@ async def create_subscription_checkout(
     if plan not in VALID_PLANS:
         raise HTTPException(status_code=400, detail="Invalid subscription plan")
 
-    plan_code = get_plan_code(plan)
-    reference = f"echostream_{current_user.id}_{uuid.uuid4().hex}"
-
     try:
         result = await initialize_transaction(
             email=current_user.email,
-            plan_code=plan_code,
-            reference=reference,
+            plan_code=get_plan_code(plan),
+            reference=f"echostream_{current_user.id}_{uuid.uuid4().hex}",
             callback_url=settings.PAYSTACK_CALLBACK_URL,
             metadata={"user_id": current_user.id, "plan": plan},
         )
     except PaystackError as exc:
         raise HTTPException(status_code=502, detail=str(exc)) from exc
 
-    subscription = current_user.subscription
+    reference = result["data"].get("reference")
+    if not reference:
+        raise HTTPException(status_code=502, detail="Paystack did not return a payment reference")
+
     timestamp = now_utc()
+    subscription = current_user.subscription
     if not subscription:
         subscription = DBSubscription(
             user_id=current_user.id,
@@ -116,7 +119,6 @@ async def create_subscription_checkout(
         subscription.status = "pending"
         subscription.reference = reference
         subscription.updated_at = timestamp
-
     db.commit()
 
     return {
@@ -155,8 +157,6 @@ async def verify_payment(
     subscription.paystack_subscription_code = data.get("subscription_code")
     subscription.updated_at = now_utc()
     subscription.last_event = "transaction.verify"
-
-    # The authoritative recurring lifecycle will be maintained by webhooks.
     current_user.subscription_status = "active"
     db.commit()
 
@@ -197,7 +197,5 @@ async def paystack_webhook(request: Request, db: Session = Depends(get_db)):
     except (UnicodeDecodeError, json.JSONDecodeError) as exc:
         raise HTTPException(status_code=400, detail="Invalid webhook payload") from exc
 
-    event = payload.get("event", "")
-    data = payload.get("data") or {}
-    apply_subscription_event(db, event, data)
+    apply_subscription_event(db, payload.get("event", ""), payload.get("data") or {})
     return {"received": True}
