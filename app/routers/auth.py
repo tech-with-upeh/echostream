@@ -164,11 +164,9 @@ async def register(user_data: UserRegisterSchema, background_tasks: BackgroundTa
         email=user_data.email,
         hashed_password=hashed_pwd,
         is_verified=False,
-        
-        # Assign free trial details automatically
-        subscription_status="free_trial",
-        trial_ends_at=trial_expiration
-    )
+        plan="free",
+        subscription_status="active",
+    )   
     db.add(new_user)
     db.commit()
     db.refresh(new_user)

@@ -40,39 +40,24 @@ def get_current_user(token: str = Depends(oauth2_scheme), db: Session = Depends(
         raise credentials_exception
     return db_user
 
-def require_active_subscription(current_user: DBUser = Depends(get_current_user), db: Session = Depends(get_db)) -> DBUser:
-    """
-    Protect premium routes. Checks if user trial or paid subscription is still valid.
-    Automatically updates expired accounts in real-time.
-    """
+def require_paid_plan(current_user: DBUser = Depends(get_current_user), db: Session = Depends(get_db)) -> DBUser:
+    """Gate for cloning-only features (Essential/Pro). Free plan never hits this."""
     now_utc = datetime.now(timezone.utc)
-    
-    # 1. Evaluate Free Trial accounts
-    if current_user.subscription_status == "free_trial":
-        # If the trial deadline has passed
-        if current_user.trial_ends_at.replace(tzinfo=timezone.utc) < now_utc:
+
+    if current_user.plan not in ("essential", "pro"):
+        raise HTTPException(status_code=402, detail="Voice cloning requires an Essential or Pro plan.")
+
+    if current_user.subscription_status == "trialing":
+        if current_user.trial_ends_at and current_user.trial_ends_at.replace(tzinfo=timezone.utc) < now_utc:
             current_user.subscription_status = "expired"
             db.commit()
-            raise HTTPException(
-                status_code=status.HTTP_402_PAYMENT_REQUIRED,
-                detail="Your free trial has expired. Please upgrade to a premium plan to continue."
-            )
-            
-    # 2. Evaluate Paid Subscription accounts
+            raise HTTPException(status_code=402, detail="Your trial has ended. Add a payment method to continue.")
     elif current_user.subscription_status == "active":
         if current_user.subscription_ends_at and current_user.subscription_ends_at.replace(tzinfo=timezone.utc) < now_utc:
             current_user.subscription_status = "expired"
             db.commit()
-            raise HTTPException(
-                status_code=status.HTTP_402_PAYMENT_REQUIRED,
-                detail="Your subscription plan has expired or billing failed. Please update your payment details."
-            )
-            
-    # 3. Block accounts that are explicitly marked expired or canceled
-    elif current_user.subscription_status in ["expired", "canceled"]:
-        raise HTTPException(
-            status_code=status.HTTP_402_PAYMENT_REQUIRED,
-            detail="Active premium subscription required."
-        )
-        
+            raise HTTPException(status_code=402, detail="Your subscription expired or billing failed.")
+    elif current_user.subscription_status in ("expired", "canceled", "past_due"):
+        raise HTTPException(status_code=402, detail="Active Essential or Pro subscription required.")
+
     return current_user
