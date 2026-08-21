@@ -19,6 +19,7 @@ async def paystack_request(
     path: str,
     *,
     payload: Optional[dict[str, Any]] = None,
+    params: Optional[dict[str, Any]] = None,
 ) -> dict[str, Any]:
     headers = {
         "Authorization": f"Bearer {settings.PAYSTACK_SECRET_KEY}",
@@ -33,17 +34,27 @@ async def paystack_request(
             method,
             path,
             json=payload,
+            params=params,
             headers=headers,
+        )
+
+    # Paystack can return an empty body for some HTTP errors. Preserve that
+    # information instead of reporting the response as a JSON parsing issue.
+    if not response.content:
+        raise PaystackError(
+            f"Paystack request failed with HTTP {response.status_code}"
         )
 
     try:
         data = response.json()
     except ValueError as exc:
-        raise PaystackError("Paystack returned an invalid response") from exc
+        raise PaystackError(
+            f"Paystack returned invalid JSON (HTTP {response.status_code})"
+        ) from exc
 
     if response.is_error or not data.get("status"):
         raise PaystackError(
-            data.get("message") or "Paystack request failed"
+            data.get("message") or f"Paystack request failed (HTTP {response.status_code})"
         )
 
     return data
@@ -84,11 +95,24 @@ async def fetch_subscription(subscription_code: str) -> dict[str, Any]:
     )
 
 
-async def fetch_customer_subscriptions(customer_code: str) -> dict[str, Any]:
-    """Fetch subscriptions belonging to a Paystack customer."""
+async def fetch_customer(customer_code: str) -> dict[str, Any]:
+    """Fetch a Paystack customer by customer code."""
     return await paystack_request(
         "GET",
-        f"/customer/{customer_code}/subscriptions",
+        f"/customer/{customer_code}",
+    )
+
+
+async def fetch_customer_subscriptions(customer_id: int) -> dict[str, Any]:
+    """List Paystack subscriptions, optionally filtered by customer ID."""
+    return await paystack_request(
+        "GET",
+        "/subscription",
+        params={
+            "customer": customer_id,
+            "perPage": 100,
+            "page": 1,
+        },
     )
 
 
