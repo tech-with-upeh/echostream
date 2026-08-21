@@ -7,6 +7,7 @@ import httpx
 
 from app.config import settings
 
+
 PAYSTACK_BASE_URL = "https://api.paystack.co"
 
 
@@ -38,8 +39,7 @@ async def paystack_request(
             headers=headers,
         )
 
-    # Paystack can return an empty body for some HTTP errors. Preserve that
-    # information instead of reporting the response as a JSON parsing issue.
+    # Paystack can return an empty response body on some errors.
     if not response.content:
         raise PaystackError(
             f"Paystack request failed with HTTP {response.status_code}"
@@ -49,16 +49,29 @@ async def paystack_request(
         data = response.json()
     except ValueError as exc:
         raise PaystackError(
-            f"Paystack returned invalid JSON (HTTP {response.status_code})"
+            f"Paystack returned invalid JSON "
+            f"(HTTP {response.status_code})"
         ) from exc
 
-    if response.is_error or not data.get("status"):
+    if response.is_error:
         raise PaystackError(
-            data.get("message") or f"Paystack request failed (HTTP {response.status_code})"
+            data.get("message")
+            or f"Paystack request failed "
+            f"(HTTP {response.status_code})"
+        )
+
+    if not data.get("status"):
+        raise PaystackError(
+            data.get("message")
+            or "Paystack request was unsuccessful"
         )
 
     return data
 
+
+# ---------------------------------------------------------------------------
+# Transactions
+# ---------------------------------------------------------------------------
 
 async def initialize_transaction(
     *,
@@ -81,30 +94,68 @@ async def initialize_transaction(
     )
 
 
-async def verify_transaction(reference: str) -> dict[str, Any]:
+async def verify_transaction(
+    reference: str,
+) -> dict[str, Any]:
     return await paystack_request(
         "GET",
         f"/transaction/verify/{reference}",
     )
 
 
-async def fetch_subscription(subscription_code: str) -> dict[str, Any]:
-    return await paystack_request(
-        "GET",
-        f"/subscription/{subscription_code}",
-    )
+# ---------------------------------------------------------------------------
+# Customers
+# ---------------------------------------------------------------------------
 
+async def fetch_customer(
+    customer_code: str,
+) -> dict[str, Any]:
+    """
+    Fetch a Paystack customer using their customer code.
 
-async def fetch_customer(customer_code: str) -> dict[str, Any]:
-    """Fetch a Paystack customer by customer code."""
+    Example:
+        CUS_lg7tzeyblao253p
+    """
+
     return await paystack_request(
         "GET",
         f"/customer/{customer_code}",
     )
 
 
-async def fetch_customer_subscriptions(customer_id: int) -> dict[str, Any]:
-    """List Paystack subscriptions, optionally filtered by customer ID."""
+# ---------------------------------------------------------------------------
+# Subscriptions
+# ---------------------------------------------------------------------------
+
+async def fetch_subscription(
+    subscription_code: str,
+) -> dict[str, Any]:
+    """
+    Fetch a single Paystack subscription.
+
+    Example:
+        SUB_xxxxxxxxx
+    """
+
+    return await paystack_request(
+        "GET",
+        f"/subscription/{subscription_code}",
+    )
+
+
+async def fetch_customer_subscriptions(
+    customer_id: int,
+) -> dict[str, Any]:
+    """
+    Fetch subscriptions belonging to a Paystack customer.
+
+    Paystack's subscription listing endpoint expects the
+    numeric customer ID, NOT the CUS_xxxxx customer code.
+
+    Example:
+        GET /subscription?customer=123456
+    """
+
     return await paystack_request(
         "GET",
         "/subscription",
@@ -116,10 +167,66 @@ async def fetch_customer_subscriptions(customer_id: int) -> dict[str, Any]:
     )
 
 
+async def fetch_customer_subscriptions_by_code(
+    customer_code: str,
+) -> dict[str, Any]:
+    """
+    Convenience helper.
+
+    Resolves:
+
+        CUS_xxxxx
+             ↓
+        Paystack customer ID
+             ↓
+        customer subscriptions
+
+    This is useful because our database stores the customer_code,
+    while Paystack's subscription listing endpoint expects the
+    numeric customer ID.
+    """
+
+    customer_response = await fetch_customer(customer_code)
+
+    customer = customer_response.get("data") or {}
+
+    customer_id = customer.get("id")
+
+    if not customer_id:
+        raise PaystackError(
+            "Paystack customer response did not contain a customer ID"
+        )
+
+    return await fetch_customer_subscriptions(
+        int(customer_id)
+    )
+
+
+# ---------------------------------------------------------------------------
+# Subscription management
+# ---------------------------------------------------------------------------
+
+async def get_subscription_manage_link(
+    subscription_code: str,
+) -> dict[str, Any]:
+    """
+    Generate Paystack's hosted subscription management link.
+    """
+
+    return await paystack_request(
+        "GET",
+        f"/subscription/{subscription_code}/manage/link",
+    )
+
+
 async def disable_subscription(
     subscription_code: str,
     email_token: str,
 ) -> dict[str, Any]:
+    """
+    Disable/cancel a Paystack subscription.
+    """
+
     return await paystack_request(
         "POST",
         "/subscription/disable",
@@ -130,16 +237,21 @@ async def disable_subscription(
     )
 
 
-async def get_subscription_manage_link(
-    subscription_code: str,
-) -> dict[str, Any]:
-    return await paystack_request(
-        "GET",
-        f"/subscription/{subscription_code}/manage/link",
-    )
+# ---------------------------------------------------------------------------
+# Webhooks
+# ---------------------------------------------------------------------------
 
+def verify_webhook_signature(
+    raw_body: bytes,
+    signature: str,
+) -> bool:
+    """
+    Verify Paystack webhook signature.
 
-def verify_webhook_signature(raw_body: bytes, signature: str) -> bool:
+    Paystack signs the raw request body using HMAC SHA-512
+    with the Paystack secret key.
+    """
+
     expected = hmac.new(
         settings.PAYSTACK_SECRET_KEY.encode("utf-8"),
         raw_body,
@@ -152,15 +264,36 @@ def verify_webhook_signature(raw_body: bytes, signature: str) -> bool:
     )
 
 
-def get_plan_code(plan: str) -> str:
+# ---------------------------------------------------------------------------
+# Plans
+# ---------------------------------------------------------------------------
+
+def get_plan_code(
+    plan: str,
+) -> str:
+    """
+    Return the Paystack plan code configured for EchoStream.
+
+    Starter intentionally has no Paystack plan because it is free.
+    """
+
     plan_codes = {
         "essential": settings.PAYSTACK_ESSENTIAL_PLAN_CODE,
         "pro": settings.PAYSTACK_PRO_PLAN_CODE,
     }
 
+    normalized_plan = plan.lower().strip()
+
     try:
-        return plan_codes[plan.lower()]
+        plan_code = plan_codes[normalized_plan]
     except KeyError as exc:
         raise PaystackError(
-            "Invalid paid subscription plan"
+            f"Invalid paid subscription plan: {plan}"
         ) from exc
+
+    if not plan_code:
+        raise PaystackError(
+            f"Paystack plan code is not configured for: {normalized_plan}"
+        )
+
+    return plan_code

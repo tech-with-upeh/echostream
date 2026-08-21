@@ -14,9 +14,10 @@ class DBUser(Base):
     is_active = Column(Boolean, default=True)
     is_verified = Column(Boolean, default=False)
 
-    subscription_status = Column(String, default="free_trial")
-    trial_ends_at = Column(DateTime, nullable=False)
-    subscription_ends_at = Column(DateTime, nullable=True)
+    plan = Column(String, nullable=False, default="starter")
+    subscription_status = Column(String, nullable=False, default="active")
+    trial_ends_at = Column(DateTime, nullable=True)
+    subscription_ends_at = Column(DateTime, nullable=True) 
 
     refresh_tokens = relationship("DBRefreshToken", back_populates="user", cascade="all, delete-orphan")
     subscription = relationship("DBSubscription", back_populates="user", uselist=False, cascade="all, delete-orphan")
