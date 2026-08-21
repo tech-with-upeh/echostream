@@ -73,13 +73,6 @@ async def change_subscription_plan(
     current_user: DBUser = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
-    """Change a paid plan.
-
-    If the existing payment has a reusable authorization (normally card),
-    schedule a Paystack subscription replacement. If it does not (for
-    example a bank transfer), create a fresh checkout instead and only switch
-    the local plan after that payment is verified.
-    """
     plan = plan.strip().lower()
     interval = interval.strip().lower()
 
@@ -99,9 +92,6 @@ async def change_subscription_plan(
     if current_user.plan == plan and current_interval == interval:
         raise HTTPException(status_code=400, detail="You are already on this plan and billing interval")
 
-    # ---------------------------------------------------------------
-    # Non-recurring payment: fresh checkout.
-    # ---------------------------------------------------------------
     if not recurring or not subscription.authorization_code:
         pending_reference = metadata.get("pending_change_reference")
         if pending_reference:
@@ -120,26 +110,15 @@ async def change_subscription_plan(
                 plan_code=get_plan_code(plan, interval),
                 reference=reference,
                 callback_url=settings.PAYSTACK_CALLBACK_URL,
-                metadata={
-                    "user_id": current_user.id,
-                    "plan": plan,
-                    "interval": interval,
-                    "purpose": "plan_change",
-                    "recurring": False,
-                },
+                metadata={"user_id": current_user.id, "plan": plan, "interval": interval, "purpose": "plan_change"},
             )
         except PaystackError as exc:
             raise HTTPException(status_code=502, detail=str(exc)) from exc
 
         data = result.get("data") or {}
         reference = data.get("reference") or reference
-        metadata.update({
-            "pending_plan": plan,
-            "pending_interval": interval,
-            "pending_change_reference": reference,
-            "pending_change_recurring": False,
-        })
-        subscription.metadata_json = json.dumps(metadata)
+        metadata.update({"pending_plan": plan, "pending_interval": interval, "pending_change_reference": reference})
+        set_metadata(subscription, metadata)
         subscription.last_event = "subscription.change.payment_pending"
         subscription.updated_at = now_utc()
         db.commit()
@@ -154,12 +133,8 @@ async def change_subscription_plan(
             "reference": reference,
             "authorization_url": data.get("authorization_url"),
             "access_code": data.get("access_code"),
-            "message": "Complete the new payment. Your current plan remains active until the new payment succeeds.",
         }
 
-    # ---------------------------------------------------------------
-    # Recurring payment: schedule replacement subscription.
-    # ---------------------------------------------------------------
     if not subscription.paystack_customer_code:
         raise HTTPException(status_code=400, detail="Paystack customer information is missing")
     if not subscription.paystack_subscription_code:
@@ -181,49 +156,23 @@ async def change_subscription_plan(
 
     try:
         existing_result = await fetch_subscription(subscription.paystack_subscription_code)
-    except PaystackError as exc:
-        raise HTTPException(status_code=502, detail=str(exc)) from exc
+        period_end = parse_datetime((existing_result.get("data") or {}).get("next_payment_date"))
+        if not period_end:
+            raise PaystackError("Could not determine the current subscription end date from Paystack")
 
-    existing_data = existing_result.get("data") or {}
-    period_end = parse_datetime(existing_data.get("next_payment_date"))
-    if not period_end:
-        raise HTTPException(status_code=400, detail="Could not determine the current subscription end date from Paystack")
-
-    start_date = period_end.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S+00:00")
-
-    try:
+        start_date = period_end.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S+00:00")
         new_result = await create_subscription(
             customer=subscription.paystack_customer_code,
             plan_code=get_plan_code(plan, interval),
             authorization_code=subscription.authorization_code,
             start_date=start_date,
         )
+        new_code = (new_result.get("data") or {}).get("subscription_code")
+        if not new_code:
+            raise PaystackError("Paystack did not return the replacement subscription code")
+        await disable_subscription(subscription.paystack_subscription_code, subscription.paystack_email_token or "")
     except PaystackError as exc:
         raise HTTPException(status_code=502, detail=str(exc)) from exc
-
-    new_data = new_result.get("data") or {}
-    new_code = new_data.get("subscription_code")
-    if not new_code:
-        raise HTTPException(status_code=502, detail="Paystack did not return the replacement subscription code")
-
-    try:
-        await disable_subscription(
-            subscription.paystack_subscription_code,
-            subscription.paystack_email_token or "",
-        )
-    except PaystackError as exc:
-        metadata.update({
-            "pending_plan": plan,
-            "pending_interval": interval,
-            "pending_subscription_code": new_code,
-            "pending_start_date": start_date,
-            "old_subscription_code": subscription.paystack_subscription_code,
-        })
-        subscription.metadata_json = json.dumps(metadata)
-        subscription.last_event = "subscription.change_pending_disable"
-        subscription.updated_at = now_utc()
-        db.commit()
-        raise HTTPException(status_code=502, detail=f"Replacement subscription was created, but the old subscription could not be disabled: {exc}") from exc
 
     metadata.update({
         "pending_plan": plan,
@@ -232,7 +181,7 @@ async def change_subscription_plan(
         "pending_start_date": start_date,
         "old_subscription_code": subscription.paystack_subscription_code,
     })
-    subscription.metadata_json = json.dumps(metadata)
+    set_metadata(subscription, metadata)
     subscription.cancel_at_period_end = True
     subscription.status = "non_renewing"
     subscription.last_event = "subscription.change_scheduled"
@@ -249,26 +198,29 @@ async def change_subscription_plan(
         "new_interval": interval,
         "new_subscription_code": new_code,
         "starts_at": start_date,
-        "message": "Your current plan remains active until the current period ends. The new recurring plan will be activated after its first successful charge.",
     }
 
 
-@router.get("/verify-nonrecurring/{reference}")
-async def verify_nonrecurring_payment(
+@router.get("/verify/{reference}")
+async def verify_payment(
     reference: str,
     current_user: DBUser = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
-    """Verify a bank-transfer/non-recurring plan purchase or plan change."""
+    """Verify any EchoStream Paystack payment in one endpoint."""
     subscription = db.query(DBSubscription).filter(
-        DBSubscription.reference == reference,
         DBSubscription.user_id == current_user.id,
+        DBSubscription.reference == reference,
     ).first()
+
+    if not subscription:
+        subscription = db.query(DBSubscription).filter(
+            DBSubscription.user_id == current_user.id,
+            DBSubscription.metadata_json.like(f'%"pending_change_reference": "{reference}"%'),
+        ).first()
+
     if not subscription:
         raise HTTPException(status_code=404, detail="Payment reference not found")
-
-    metadata = get_metadata(subscription)
-    pending_reference = metadata.get("pending_change_reference")
 
     try:
         result = await verify_transaction(reference)
@@ -279,9 +231,9 @@ async def verify_nonrecurring_payment(
     if data.get("status") != "success":
         return {"status": data.get("status", "failed"), "reference": reference}
 
-    payment_plan = metadata.get("pending_plan") or subscription.plan
-    payment_interval = metadata.get("pending_interval") or metadata.get("interval", "month")
-    purpose = metadata.get("purpose")
+    metadata = get_metadata(subscription)
+    payment_plan = metadata.get("pending_plan") or metadata.get("plan") or subscription.plan
+    payment_interval = metadata.get("pending_interval") or metadata.get("interval") or "month"
 
     if payment_plan not in PAID_PLANS or payment_interval not in VALID_INTERVALS:
         raise HTTPException(status_code=400, detail="Payment metadata is invalid")
@@ -289,48 +241,52 @@ async def verify_nonrecurring_payment(
     authorization = data.get("authorization") or {}
     customer = data.get("customer") or {}
     authorization_code = authorization.get("authorization_code")
-
-    # A payment with no reusable authorization is treated as a fixed-term
-    # purchase. If Paystack did provide a reusable authorization, preserve it
-    # so future payments can use the recurring flow.
     channel = str(data.get("channel") or "").lower()
-    recurring = bool(authorization_code)
-    if channel in {"bank", "bank_transfer"} and not authorization_code:
-        recurring = False
-
+    recurring = bool(authorization_code) and bool(data.get("subscription_code"))
     paid_at = parse_datetime(data.get("paid_at")) or now_utc()
-    ends_at = add_billing_period(paid_at, payment_interval)
 
-    if purpose == "plan_change" or pending_reference == reference:
-        subscription.plan = payment_plan
-        metadata["interval"] = payment_interval
-        metadata.pop("pending_plan", None)
-        metadata.pop("pending_interval", None)
-        metadata.pop("pending_change_reference", None)
-        metadata.pop("pending_change_recurring", None)
+    if recurring:
+        subscription_code = data.get("subscription_code")
+        try:
+            remote = await fetch_subscription(subscription_code)
+            remote_data = remote.get("data") or {}
+            period_start = parse_datetime(remote_data.get("start")) or paid_at
+            period_end = parse_datetime(remote_data.get("next_payment_date"))
+        except PaystackError:
+            period_start = paid_at
+            period_end = None
     else:
-        subscription.plan = payment_plan
-        metadata["interval"] = payment_interval
+        period_start = paid_at
+        period_end = add_billing_period(paid_at, payment_interval)
 
-    metadata["recurring"] = recurring
-    metadata["payment_channel"] = channel or "unknown"
-    metadata["last_payment_reference"] = reference
-    set_metadata(subscription, metadata)
+    if not period_end:
+        period_end = add_billing_period(period_start, payment_interval)
 
+    subscription.plan = payment_plan
     subscription.status = "active"
     subscription.reference = reference
     subscription.authorization_code = authorization_code
     subscription.paystack_customer_code = customer.get("customer_code")
     subscription.paystack_subscription_code = data.get("subscription_code") if recurring else None
-    subscription.current_period_start = paid_at
-    subscription.current_period_end = ends_at
+    subscription.current_period_start = period_start
+    subscription.current_period_end = period_end
     subscription.cancel_at_period_end = not recurring
-    subscription.last_event = "transaction.verify.nonrecurring" if not recurring else "transaction.verify.recurring"
+    subscription.last_event = "transaction.verify.recurring" if recurring else "transaction.verify.one_time"
     subscription.updated_at = now_utc()
+
+    metadata["interval"] = payment_interval
+    metadata["recurring"] = recurring
+    metadata["payment_channel"] = channel or "unknown"
+    metadata["last_payment_reference"] = reference
+    metadata.pop("pending_plan", None)
+    metadata.pop("pending_interval", None)
+    metadata.pop("pending_change_reference", None)
+    metadata.pop("pending_change_recurring", None)
+    set_metadata(subscription, metadata)
 
     current_user.plan = payment_plan
     current_user.subscription_status = "active"
-    current_user.subscription_ends_at = ends_at
+    current_user.subscription_ends_at = period_end
 
     db.commit()
 
