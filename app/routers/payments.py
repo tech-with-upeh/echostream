@@ -3,6 +3,7 @@ import uuid
 from datetime import datetime, timezone
 
 from fastapi import APIRouter, Depends, HTTPException, Request, status
+from fastapi.responses import RedirectResponse
 from sqlalchemy.orm import Session
 
 from app.config import settings
@@ -18,7 +19,7 @@ from app.paystack_service import (
 )
 
 router = APIRouter(prefix="/payments", tags=["Payments"])
-VALID_PLANS = {"starter", "essential", "pro"}
+PAID_PLANS = {"essential", "pro"}
 
 
 def now_utc() -> datetime:
@@ -34,18 +35,12 @@ def apply_subscription_event(db: Session, event: str, data: dict) -> None:
 
     subscription = None
     if subscription_code:
-        subscription = db.query(DBSubscription).filter(
-            DBSubscription.paystack_subscription_code == subscription_code
-        ).first()
-
+        subscription = db.query(DBSubscription).filter(DBSubscription.paystack_subscription_code == subscription_code).first()
     if not subscription and user_id:
         try:
-            subscription = db.query(DBSubscription).filter(
-                DBSubscription.user_id == int(user_id)
-            ).first()
+            subscription = db.query(DBSubscription).filter(DBSubscription.user_id == int(user_id)).first()
         except (TypeError, ValueError):
             subscription = None
-
     if not subscription:
         return
 
@@ -67,12 +62,15 @@ def apply_subscription_event(db: Session, event: str, data: dict) -> None:
 
     user = subscription.user
     if new_status == "active":
+        user.plan = subscription.plan
         user.subscription_status = "active"
     elif new_status in {"canceled", "non_renewing"}:
         if subscription.current_period_end and subscription.current_period_end > now_utc():
             user.subscription_status = "active"
         else:
-            user.subscription_status = "canceled"
+            user.plan = "starter"
+            user.subscription_status = "active"
+            user.subscription_ends_at = None
 
     db.commit()
 
@@ -84,14 +82,20 @@ async def create_subscription_checkout(
     db: Session = Depends(get_db),
 ):
     plan = plan.lower().strip()
-    if plan not in VALID_PLANS:
-        raise HTTPException(status_code=400, detail="Invalid subscription plan")
 
+    if plan == "starter":
+        raise HTTPException(status_code=400, detail="Starter is the free plan and does not require payment.")
+    if plan not in PAID_PLANS:
+        raise HTTPException(status_code=400, detail="Invalid paid subscription plan")
+    if current_user.plan == plan and current_user.subscription_status == "active":
+        raise HTTPException(status_code=400, detail=f"You are already subscribed to the {plan} plan.")
+
+    reference = f"echostream_{current_user.id}_{uuid.uuid4().hex}"
     try:
         result = await initialize_transaction(
             email=current_user.email,
             plan_code=get_plan_code(plan),
-            reference=f"echostream_{current_user.id}_{uuid.uuid4().hex}",
+            reference=reference,
             callback_url=settings.PAYSTACK_CALLBACK_URL,
             metadata={"user_id": current_user.id, "plan": plan},
         )
@@ -129,16 +133,17 @@ async def create_subscription_checkout(
     }
 
 
+@router.get("/callback")
+async def payment_callback(reference: str | None = None, trxref: str | None = None):
+    payment_reference = reference or trxref
+    if not payment_reference:
+        return RedirectResponse(url=f"{settings.FRONTEND_URL}/payment/failed")
+    return RedirectResponse(url=f"{settings.FRONTEND_URL}/payment/success?reference={payment_reference}")
+
+
 @router.get("/verify/{reference}")
-async def verify_payment(
-    reference: str,
-    current_user: DBUser = Depends(get_current_user),
-    db: Session = Depends(get_db),
-):
-    subscription = db.query(DBSubscription).filter(
-        DBSubscription.reference == reference,
-        DBSubscription.user_id == current_user.id,
-    ).first()
+async def verify_payment(reference: str, current_user: DBUser = Depends(get_current_user), db: Session = Depends(get_db)):
+    subscription = db.query(DBSubscription).filter(DBSubscription.reference == reference, DBSubscription.user_id == current_user.id).first()
     if not subscription:
         raise HTTPException(status_code=404, detail="Payment reference not found")
 
@@ -157,31 +162,22 @@ async def verify_payment(
     subscription.paystack_subscription_code = data.get("subscription_code")
     subscription.updated_at = now_utc()
     subscription.last_event = "transaction.verify"
+    current_user.plan = subscription.plan
     current_user.subscription_status = "active"
     db.commit()
 
-    return {
-        "status": "success",
-        "plan": subscription.plan,
-        "subscription_status": current_user.subscription_status,
-        "reference": reference,
-    }
+    return {"status": "success", "plan": current_user.plan, "subscription_status": current_user.subscription_status, "reference": reference}
 
 
 @router.get("/manage")
-async def manage_subscription(
-    current_user: DBUser = Depends(get_current_user),
-    db: Session = Depends(get_db),
-):
+async def manage_subscription(current_user: DBUser = Depends(get_current_user), db: Session = Depends(get_db)):
     subscription = current_user.subscription
     if not subscription or not subscription.paystack_subscription_code:
         raise HTTPException(status_code=404, detail="No Paystack subscription found")
-
     try:
         result = await get_subscription_manage_link(subscription.paystack_subscription_code)
     except PaystackError as exc:
         raise HTTPException(status_code=502, detail=str(exc)) from exc
-
     return {"link": result.get("data", {}).get("link")}
 
 
@@ -191,11 +187,9 @@ async def paystack_webhook(request: Request, db: Session = Depends(get_db)):
     signature = request.headers.get("x-paystack-signature", "")
     if not verify_webhook_signature(raw_body, signature):
         raise HTTPException(status_code=401, detail="Invalid webhook signature")
-
     try:
         payload = json.loads(raw_body.decode("utf-8"))
     except (UnicodeDecodeError, json.JSONDecodeError) as exc:
         raise HTTPException(status_code=400, detail="Invalid webhook payload") from exc
-
     apply_subscription_event(db, payload.get("event", ""), payload.get("data") or {})
     return {"received": True}
