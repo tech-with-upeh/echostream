@@ -4,7 +4,6 @@ from datetime import datetime, timezone
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session
 
-from app.config import settings
 from app.dependencies import get_current_user, get_db
 from app.models import DBSubscription, DBUser
 from app.paystack_service import (
@@ -34,6 +33,16 @@ def parse_datetime(value: str | None) -> datetime | None:
         return None
 
 
+def get_metadata(subscription: DBSubscription) -> dict:
+    if not subscription.metadata_json:
+        return {}
+    try:
+        value = json.loads(subscription.metadata_json)
+        return value if isinstance(value, dict) else {}
+    except json.JSONDecodeError:
+        return {}
+
+
 @router.post("/change-plan")
 async def change_subscription_plan(
     plan: str,
@@ -41,56 +50,45 @@ async def change_subscription_plan(
     current_user: DBUser = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
-    """Switch an existing paid subscription to another Paystack plan.
-
-    Paystack doesn't expose a direct "move this subscription to another
-    plan" endpoint. We therefore create the replacement subscription with
-    the existing reusable authorization and schedule its first debit for the
-    end of the current billing period, then disable the old subscription.
-
-    EchoStream keeps the current plan active locally until that period ends.
-    """
     plan = plan.strip().lower()
     interval = interval.strip().lower()
 
     if plan not in PAID_PLANS:
         raise HTTPException(status_code=400, detail="Invalid paid subscription plan")
-
     if interval not in VALID_INTERVALS:
         raise HTTPException(status_code=400, detail="Invalid billing interval. Use month or year.")
 
     subscription = current_user.subscription
-    if not subscription:
-        raise HTTPException(status_code=400, detail="No subscription found")
+    if not subscription or subscription.status not in {"active", "non_renewing"}:
+        raise HTTPException(status_code=400, detail="You do not have an active paid subscription to change.")
 
-    if subscription.status not in {"active", "non_renewing"}:
-        raise HTTPException(status_code=400, detail="Your subscription is not active")
-
-    # Keep the billing interval in metadata because the DB subscription model
-    # intentionally stores the product plan separately from the interval.
-    current_interval = None
-    if subscription.metadata_json:
-        try:
-            current_interval = json.loads(subscription.metadata_json).get("interval")
-        except json.JSONDecodeError:
-            current_interval = None
-
+    metadata = get_metadata(subscription)
+    current_interval = metadata.get("interval")
     if current_user.plan == plan and current_interval == interval:
         raise HTTPException(status_code=400, detail="You are already on this plan and billing interval")
 
     if not subscription.paystack_customer_code:
         raise HTTPException(status_code=400, detail="Paystack customer information is missing")
-
     if not subscription.authorization_code:
-        raise HTTPException(
-            status_code=400,
-            detail="Your current payment authorization cannot be reused. Please use normal checkout.",
-        )
-
-    # Always refresh from Paystack before changing anything so the local
-    # period-end value is not stale.
+        raise HTTPException(status_code=400, detail="Your current payment authorization cannot be reused. Please use normal checkout.")
     if not subscription.paystack_subscription_code:
         raise HTTPException(status_code=400, detail="Paystack subscription code is missing")
+
+    # Idempotency: if a replacement is already scheduled, return it rather
+    # than creating another subscription.
+    if metadata.get("pending_subscription_code"):
+        if metadata.get("pending_plan") == plan and metadata.get("pending_interval") == interval:
+            return {
+                "status": "already_scheduled",
+                "current_plan": current_user.plan,
+                "current_interval": current_interval,
+                "current_subscription_ends_at": current_user.subscription_ends_at,
+                "new_plan": plan,
+                "new_interval": interval,
+                "new_subscription_code": metadata["pending_subscription_code"],
+                "starts_at": metadata.get("pending_start_date"),
+            }
+        raise HTTPException(status_code=409, detail="A different subscription change is already scheduled.")
 
     try:
         existing_result = await fetch_subscription(subscription.paystack_subscription_code)
@@ -98,39 +96,9 @@ async def change_subscription_plan(
         raise HTTPException(status_code=502, detail=str(exc)) from exc
 
     existing_data = existing_result.get("data") or {}
-    period_end_raw = existing_data.get("next_payment_date")
-    period_end = parse_datetime(period_end_raw)
-
+    period_end = parse_datetime(existing_data.get("next_payment_date"))
     if not period_end:
-        raise HTTPException(
-            status_code=400,
-            detail="Could not determine the current subscription end date from Paystack",
-        )
-
-    # Prevent accidentally creating another replacement subscription if the
-    # endpoint is retried after a successful create.
-    pending = {}
-    if subscription.metadata_json:
-        try:
-            pending = json.loads(subscription.metadata_json)
-        except json.JSONDecodeError:
-            pending = {}
-
-    if (
-        pending.get("pending_plan") == plan
-        and pending.get("pending_interval") == interval
-        and pending.get("pending_subscription_code")
-    ):
-        return {
-            "status": "already_scheduled",
-            "current_plan": current_user.plan,
-            "current_interval": current_interval,
-            "current_subscription_ends_at": current_user.subscription_ends_at,
-            "new_plan": plan,
-            "new_interval": interval,
-            "new_subscription_code": pending["pending_subscription_code"],
-            "starts_at": pending.get("pending_start_date"),
-        }
+        raise HTTPException(status_code=400, detail="Could not determine the current subscription end date from Paystack")
 
     start_date = period_end.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S+00:00")
 
@@ -149,48 +117,35 @@ async def change_subscription_plan(
     if not new_code:
         raise HTTPException(status_code=502, detail="Paystack did not return the replacement subscription code")
 
-    # Disable the old recurring subscription so it cannot charge again. The
-    # new subscription is already scheduled for the current period end.
+    # Do not change the user's plan yet. First disable the old recurring debit.
+    # The replacement is scheduled for the end of the current period.
     try:
         await disable_subscription(
             subscription.paystack_subscription_code,
             subscription.paystack_email_token or "",
         )
     except PaystackError as exc:
-        # The new subscription exists, but the old one could not be disabled.
-        # Do not silently claim the switch succeeded because that could cause
-        # a duplicate charge. Store the pending code so the operation can be
-        # retried safely.
-        pending.update({
+        metadata.update({
             "pending_plan": plan,
             "pending_interval": interval,
             "pending_subscription_code": new_code,
             "pending_start_date": start_date,
             "old_subscription_code": subscription.paystack_subscription_code,
         })
-        subscription.metadata_json = json.dumps(pending)
+        subscription.metadata_json = json.dumps(metadata)
         subscription.last_event = "subscription.change_pending_disable"
         subscription.updated_at = now_utc()
         db.commit()
-        raise HTTPException(
-            status_code=502,
-            detail=(
-                "Replacement subscription was created, but the old subscription "
-                f"could not be disabled: {exc}"
-            ),
-        ) from exc
+        raise HTTPException(status_code=502, detail=f"Replacement subscription was created, but the old subscription could not be disabled: {exc}") from exc
 
-    pending.update({
+    metadata.update({
         "pending_plan": plan,
         "pending_interval": interval,
         "pending_subscription_code": new_code,
         "pending_start_date": start_date,
         "old_subscription_code": subscription.paystack_subscription_code,
     })
-
-    # Do NOT change current_user.plan yet. The current subscription remains
-    # active locally until its existing paid period ends.
-    subscription.metadata_json = json.dumps(pending)
+    subscription.metadata_json = json.dumps(metadata)
     subscription.cancel_at_period_end = True
     subscription.status = "non_renewing"
     subscription.last_event = "subscription.change_scheduled"
@@ -206,5 +161,5 @@ async def change_subscription_plan(
         "new_interval": interval,
         "new_subscription_code": new_code,
         "starts_at": start_date,
-        "message": "The current plan remains active until the current billing period ends. The new plan starts afterward.",
+        "message": "Your current subscription remains active until its current period ends. The new plan will be activated after its first successful charge.",
     }
