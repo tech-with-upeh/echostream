@@ -108,7 +108,6 @@ async def create_plan(
     interval: str,
     description: str | None = None,
 ) -> dict[str, Any]:
-    """Create a Paystack subscription plan. Amount is in NGN kobo."""
     payload: dict[str, Any] = {
         "name": name,
         "amount": amount_naira * 100,
@@ -133,8 +132,8 @@ async def update_plan(
     amount_naira: int | None = None,
     interval: str | None = None,
     description: str | None = None,
+    update_existing_subscriptions: bool | None = None,
 ) -> dict[str, Any]:
-    """Update an existing Paystack plan."""
     payload: dict[str, Any] = {}
 
     if name is not None:
@@ -148,6 +147,11 @@ async def update_plan(
 
     if description is not None:
         payload["description"] = description
+
+    if update_existing_subscriptions is not None:
+        payload["update_existing_subscriptions"] = (
+            update_existing_subscriptions
+        )
 
     return await paystack_request(
         "PUT",
@@ -185,6 +189,32 @@ async def fetch_customer(customer_code: str) -> dict[str, Any]:
 # ---------------------------------------------------------------------------
 # Subscriptions
 # ---------------------------------------------------------------------------
+
+async def create_subscription(
+    *,
+    customer: str,
+    plan_code: str,
+    authorization_code: str | None = None,
+    start_date: str | None = None,
+) -> dict[str, Any]:
+    """Create a subscription using an existing Paystack authorization."""
+    payload: dict[str, Any] = {
+        "customer": customer,
+        "plan": plan_code,
+    }
+
+    if authorization_code:
+        payload["authorization"] = authorization_code
+
+    if start_date:
+        payload["start_date"] = start_date
+
+    return await paystack_request(
+        "POST",
+        "/subscription",
+        payload=payload,
+    )
+
 
 async def fetch_subscription(subscription_code: str) -> dict[str, Any]:
     return await paystack_request(
@@ -277,7 +307,6 @@ def get_plan_code(
     plan: str,
     interval: str = "month",
 ) -> str:
-    """Return the configured Paystack plan code for plan + billing period."""
     normalized_plan = plan.lower().strip()
     normalized_interval = interval.lower().strip()
 
