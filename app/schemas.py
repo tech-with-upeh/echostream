@@ -18,12 +18,11 @@ class UserResponse(BaseModel):
     last_name: str
     email: EmailStr
     is_verified: bool
-    
-    # Subscription responses
+    plan: str
     subscription_status: str
-    trial_ends_at: datetime
+    trial_ends_at: Optional[datetime] = None
     subscription_ends_at: Optional[datetime] = None
-    
+
     class Config:
         from_attributes = True
 
