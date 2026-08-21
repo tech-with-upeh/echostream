@@ -7,5 +7,4 @@ pydantic-settings
 fastapi-mail
 google-auth
 edge-tts
-
-
+httpx

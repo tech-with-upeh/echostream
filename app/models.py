@@ -1,6 +1,7 @@
-from sqlalchemy import Column, Integer, String, Boolean, ForeignKey, DateTime
+from sqlalchemy import Column, Integer, String, Boolean, ForeignKey, DateTime, Text
 from sqlalchemy.orm import relationship
 from app.database import Base
+
 
 class DBUser(Base):
     __tablename__ = "users"
@@ -20,6 +21,8 @@ class DBUser(Base):
     subscription_ends_at = Column(DateTime, nullable=True)
 
     refresh_tokens = relationship("DBRefreshToken", back_populates="user", cascade="all, delete-orphan")
+    subscription = relationship("DBSubscription", back_populates="user", uselist=False, cascade="all, delete-orphan")
+
 
 class DBRefreshToken(Base):
     __tablename__ = "refresh_tokens"
@@ -28,6 +31,7 @@ class DBRefreshToken(Base):
     user_id = Column(Integer, ForeignKey("users.id", ondelete="CASCADE"), nullable=False)
     expires_at = Column(DateTime, nullable=False)
     user = relationship("DBUser", back_populates="refresh_tokens")
+
 
 class DBEmailVerificationCode(Base):
     __tablename__ = "email_verification_codes"
