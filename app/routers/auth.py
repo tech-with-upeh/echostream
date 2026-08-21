@@ -81,8 +81,24 @@ async def register(user_data: UserRegisterSchema, background_tasks: BackgroundTa
     if existing_user:
         raise HTTPException(status_code=400, detail="An account with this email already exists.")
     now_utc = datetime.now(timezone.utc)
-    new_user = DBUser(first_name=user_data.first_name, last_name=user_data.last_name, email=user_data.email, hashed_password=get_password_hash(user_data.password), is_active=True, is_verified=False, plan="starter", subscription_status="active", trial_ends_at=None, subscription_ends_at=None)
-    db.add(new_user); db.commit(); db.refresh(new_user)
+    trial_duration = timedelta(days=14)
+    trial_expiration = now_utc + trial_duration
+
+    hashed_pwd = get_password_hash(user_data.password)
+    new_user = DBUser(
+        first_name=user_data.first_name,
+        last_name=user_data.last_name,
+        email=user_data.email,
+        hashed_password=hashed_pwd,
+        is_verified=False,
+        plan="free",
+        subscription_status="active",
+    )   
+    db.add(new_user)
+    db.commit()
+    db.refresh(new_user)
+    
+    # Send verification mail parameters asynchronously
     v_token = create_verification_token(email=new_user.email)
     v_code = generate_numeric_otp(length=6)
     db.add(DBEmailVerificationCode(email=new_user.email, code=v_code, expires_at=now_utc + timedelta(hours=2))); db.commit()
