@@ -39,7 +39,6 @@ async def paystack_request(
             headers=headers,
         )
 
-    # Paystack can return an empty response body on some errors.
     if not response.content:
         raise PaystackError(
             f"Paystack request failed with HTTP {response.status_code}"
@@ -49,21 +48,18 @@ async def paystack_request(
         data = response.json()
     except ValueError as exc:
         raise PaystackError(
-            f"Paystack returned invalid JSON "
-            f"(HTTP {response.status_code})"
+            f"Paystack returned invalid JSON (HTTP {response.status_code})"
         ) from exc
 
     if response.is_error:
         raise PaystackError(
             data.get("message")
-            or f"Paystack request failed "
-            f"(HTTP {response.status_code})"
+            or f"Paystack request failed (HTTP {response.status_code})"
         )
 
     if not data.get("status"):
         raise PaystackError(
-            data.get("message")
-            or "Paystack request was unsuccessful"
+            data.get("message") or "Paystack request was unsuccessful"
         )
 
     return data
@@ -94,9 +90,7 @@ async def initialize_transaction(
     )
 
 
-async def verify_transaction(
-    reference: str,
-) -> dict[str, Any]:
+async def verify_transaction(reference: str) -> dict[str, Any]:
     return await paystack_request(
         "GET",
         f"/transaction/verify/{reference}",
@@ -104,19 +98,84 @@ async def verify_transaction(
 
 
 # ---------------------------------------------------------------------------
+# Paystack plans
+# ---------------------------------------------------------------------------
+
+async def create_plan(
+    *,
+    name: str,
+    amount_naira: int,
+    interval: str,
+    description: str | None = None,
+) -> dict[str, Any]:
+    """Create a Paystack subscription plan. Amount is in NGN kobo."""
+    payload: dict[str, Any] = {
+        "name": name,
+        "amount": amount_naira * 100,
+        "interval": interval,
+        "currency": "NGN",
+    }
+
+    if description:
+        payload["description"] = description
+
+    return await paystack_request(
+        "POST",
+        "/plan",
+        payload=payload,
+    )
+
+
+async def update_plan(
+    plan_code: str,
+    *,
+    name: str | None = None,
+    amount_naira: int | None = None,
+    interval: str | None = None,
+    description: str | None = None,
+) -> dict[str, Any]:
+    """Update an existing Paystack plan."""
+    payload: dict[str, Any] = {}
+
+    if name is not None:
+        payload["name"] = name
+
+    if amount_naira is not None:
+        payload["amount"] = amount_naira * 100
+
+    if interval is not None:
+        payload["interval"] = interval
+
+    if description is not None:
+        payload["description"] = description
+
+    return await paystack_request(
+        "PUT",
+        f"/plan/{plan_code}",
+        payload=payload,
+    )
+
+
+async def list_plans(
+    *,
+    page: int = 1,
+    per_page: int = 100,
+) -> dict[str, Any]:
+    return await paystack_request(
+        "GET",
+        "/plan",
+        params={
+            "page": page,
+            "perPage": per_page,
+        },
+    )
+
+
+# ---------------------------------------------------------------------------
 # Customers
 # ---------------------------------------------------------------------------
 
-async def fetch_customer(
-    customer_code: str,
-) -> dict[str, Any]:
-    """
-    Fetch a Paystack customer using their customer code.
-
-    Example:
-        CUS_lg7tzeyblao253p
-    """
-
+async def fetch_customer(customer_code: str) -> dict[str, Any]:
     return await paystack_request(
         "GET",
         f"/customer/{customer_code}",
@@ -127,16 +186,7 @@ async def fetch_customer(
 # Subscriptions
 # ---------------------------------------------------------------------------
 
-async def fetch_subscription(
-    subscription_code: str,
-) -> dict[str, Any]:
-    """
-    Fetch a single Paystack subscription.
-
-    Example:
-        SUB_xxxxxxxxx
-    """
-
+async def fetch_subscription(subscription_code: str) -> dict[str, Any]:
     return await paystack_request(
         "GET",
         f"/subscription/{subscription_code}",
@@ -146,16 +196,6 @@ async def fetch_subscription(
 async def fetch_customer_subscriptions(
     customer_id: int,
 ) -> dict[str, Any]:
-    """
-    Fetch subscriptions belonging to a Paystack customer.
-
-    Paystack's subscription listing endpoint expects the
-    numeric customer ID, NOT the CUS_xxxxx customer code.
-
-    Example:
-        GET /subscription?customer=123456
-    """
-
     return await paystack_request(
         "GET",
         "/subscription",
@@ -170,26 +210,8 @@ async def fetch_customer_subscriptions(
 async def fetch_customer_subscriptions_by_code(
     customer_code: str,
 ) -> dict[str, Any]:
-    """
-    Convenience helper.
-
-    Resolves:
-
-        CUS_xxxxx
-             ↓
-        Paystack customer ID
-             ↓
-        customer subscriptions
-
-    This is useful because our database stores the customer_code,
-    while Paystack's subscription listing endpoint expects the
-    numeric customer ID.
-    """
-
     customer_response = await fetch_customer(customer_code)
-
     customer = customer_response.get("data") or {}
-
     customer_id = customer.get("id")
 
     if not customer_id:
@@ -197,9 +219,7 @@ async def fetch_customer_subscriptions_by_code(
             "Paystack customer response did not contain a customer ID"
         )
 
-    return await fetch_customer_subscriptions(
-        int(customer_id)
-    )
+    return await fetch_customer_subscriptions(int(customer_id))
 
 
 # ---------------------------------------------------------------------------
@@ -209,10 +229,6 @@ async def fetch_customer_subscriptions_by_code(
 async def get_subscription_manage_link(
     subscription_code: str,
 ) -> dict[str, Any]:
-    """
-    Generate Paystack's hosted subscription management link.
-    """
-
     return await paystack_request(
         "GET",
         f"/subscription/{subscription_code}/manage/link",
@@ -223,10 +239,6 @@ async def disable_subscription(
     subscription_code: str,
     email_token: str,
 ) -> dict[str, Any]:
-    """
-    Disable/cancel a Paystack subscription.
-    """
-
     return await paystack_request(
         "POST",
         "/subscription/disable",
@@ -245,13 +257,6 @@ def verify_webhook_signature(
     raw_body: bytes,
     signature: str,
 ) -> bool:
-    """
-    Verify Paystack webhook signature.
-
-    Paystack signs the raw request body using HMAC SHA-512
-    with the Paystack secret key.
-    """
-
     expected = hmac.new(
         settings.PAYSTACK_SECRET_KEY.encode("utf-8"),
         raw_body,
@@ -265,35 +270,38 @@ def verify_webhook_signature(
 
 
 # ---------------------------------------------------------------------------
-# Plans
+# Plan helpers
 # ---------------------------------------------------------------------------
 
 def get_plan_code(
     plan: str,
+    interval: str = "month",
 ) -> str:
-    """
-    Return the Paystack plan code configured for EchoStream.
-
-    Starter intentionally has no Paystack plan because it is free.
-    """
+    """Return the configured Paystack plan code for plan + billing period."""
+    normalized_plan = plan.lower().strip()
+    normalized_interval = interval.lower().strip()
 
     plan_codes = {
-        "essential": settings.PAYSTACK_ESSENTIAL_PLAN_CODE,
-        "pro": settings.PAYSTACK_PRO_PLAN_CODE,
+        ("essential", "month"): settings.PAYSTACK_ESSENTIAL_MONTHLY_PLAN_CODE
+        or settings.PAYSTACK_ESSENTIAL_PLAN_CODE,
+        ("essential", "year"): settings.PAYSTACK_ESSENTIAL_YEARLY_PLAN_CODE,
+        ("pro", "month"): settings.PAYSTACK_PRO_MONTHLY_PLAN_CODE
+        or settings.PAYSTACK_PRO_PLAN_CODE,
+        ("pro", "year"): settings.PAYSTACK_PRO_YEARLY_PLAN_CODE,
     }
 
-    normalized_plan = plan.lower().strip()
-
     try:
-        plan_code = plan_codes[normalized_plan]
+        plan_code = plan_codes[(normalized_plan, normalized_interval)]
     except KeyError as exc:
         raise PaystackError(
-            f"Invalid paid subscription plan: {plan}"
+            f"Invalid subscription plan/interval: "
+            f"{normalized_plan}/{normalized_interval}"
         ) from exc
 
     if not plan_code:
         raise PaystackError(
-            f"Paystack plan code is not configured for: {normalized_plan}"
+            f"Paystack plan code is not configured for: "
+            f"{normalized_plan}/{normalized_interval}"
         )
 
     return plan_code
