@@ -11,7 +11,8 @@ from app.dependencies import get_current_user, get_db
 from app.models import DBSubscription, DBUser
 from app.paystack_service import (
     PaystackError,
-    fetch_customer_subscriptions,
+    fetch_customer_subscriptions_by_code,
+    fetch_subscription,
     get_plan_code,
     get_subscription_manage_link,
     initialize_transaction,
@@ -27,24 +28,108 @@ def now_utc() -> datetime:
     return datetime.now(timezone.utc)
 
 
-def apply_subscription_event(db: Session, event: str, data: dict) -> None:
+def parse_paystack_datetime(value) -> datetime | None:
+    """Parse a Paystack ISO-8601 date into a timezone-aware datetime."""
+    if not value:
+        return None
+
+    if isinstance(value, datetime):
+        if value.tzinfo is None:
+            return value.replace(tzinfo=timezone.utc)
+        return value
+
+    if not isinstance(value, str):
+        return None
+
+    try:
+        parsed = datetime.fromisoformat(
+            value.replace("Z", "+00:00")
+        )
+    except ValueError:
+        return None
+
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+
+    return parsed
+
+
+def update_subscription_period(
+    user: DBUser,
+    subscription: DBSubscription,
+    data: dict,
+) -> None:
+    """Persist Paystack's current billing period on both records.
+
+    Paystack exposes the next billing date as `next_payment_date` on
+    subscription responses. We use that as the local subscription end date
+    for the current paid period.
+    """
+    if not data:
+        return
+
+    start = parse_paystack_datetime(
+        data.get("start")
+        or data.get("current_period_start")
+    )
+
+    end = parse_paystack_datetime(
+        data.get("next_payment_date")
+        or data.get("current_period_end")
+    )
+
+    if start:
+        subscription.current_period_start = start
+
+    if end:
+        subscription.current_period_end = end
+        user.subscription_ends_at = end
+
+
+def apply_subscription_event(
+    db: Session,
+    event: str,
+    data: dict,
+) -> None:
     subscription_code = data.get("subscription_code")
+
     customer = data.get("customer") or {}
-    customer_code = customer.get("customer_code") if isinstance(customer, dict) else None
+
+    customer_code = (
+        customer.get("customer_code")
+        if isinstance(customer, dict)
+        else None
+    )
+
     metadata = data.get("metadata") or {}
-    user_id = metadata.get("user_id") if isinstance(metadata, dict) else None
+
+    user_id = (
+        metadata.get("user_id")
+        if isinstance(metadata, dict)
+        else None
+    )
 
     subscription = None
+
     if subscription_code:
-        subscription = db.query(DBSubscription).filter(
-            DBSubscription.paystack_subscription_code == subscription_code
-        ).first()
+        subscription = (
+            db.query(DBSubscription)
+            .filter(
+                DBSubscription.paystack_subscription_code
+                == subscription_code
+            )
+            .first()
+        )
 
     if not subscription and user_id:
         try:
-            subscription = db.query(DBSubscription).filter(
-                DBSubscription.user_id == int(user_id)
-            ).first()
+            subscription = (
+                db.query(DBSubscription)
+                .filter(
+                    DBSubscription.user_id == int(user_id)
+                )
+                .first()
+            )
         except (TypeError, ValueError):
             subscription = None
 
@@ -60,6 +145,13 @@ def apply_subscription_event(db: Session, event: str, data: dict) -> None:
     if subscription_code:
         subscription.paystack_subscription_code = subscription_code
 
+    # Paystack subscription payloads contain the billing period data.
+    update_subscription_period(
+        subscription.user,
+        subscription,
+        data,
+    )
+
     status_map = {
         "subscription.create": "active",
         "charge.success": "active",
@@ -69,6 +161,7 @@ def apply_subscription_event(db: Session, event: str, data: dict) -> None:
     }
 
     new_status = status_map.get(event)
+
     if new_status:
         subscription.status = new_status
 
@@ -79,6 +172,8 @@ def apply_subscription_event(db: Session, event: str, data: dict) -> None:
         user.subscription_status = "active"
 
     elif new_status in {"canceled", "non_renewing"}:
+        # A cancelled/non-renewing subscription remains usable until the
+        # current paid period ends.
         if (
             subscription.current_period_end
             and subscription.current_period_end > now_utc()
@@ -88,6 +183,7 @@ def apply_subscription_event(db: Session, event: str, data: dict) -> None:
             user.plan = "starter"
             user.subscription_status = "active"
             user.subscription_ends_at = None
+            subscription.current_period_end = None
 
     db.commit()
 
@@ -103,7 +199,9 @@ async def create_subscription_checkout(
     if plan == "starter":
         raise HTTPException(
             status_code=400,
-            detail="Starter is the free plan and does not require payment.",
+            detail=(
+                "Starter is the free plan and does not require payment."
+            ),
         )
 
     if plan not in PAID_PLANS:
@@ -118,10 +216,14 @@ async def create_subscription_checkout(
     ):
         raise HTTPException(
             status_code=400,
-            detail=f"You are already subscribed to the {plan} plan.",
+            detail=(
+                f"You are already subscribed to the {plan} plan."
+            ),
         )
 
-    reference = f"echostream_{current_user.id}_{uuid.uuid4().hex}"
+    reference = (
+        f"echostream_{current_user.id}_{uuid.uuid4().hex}"
+    )
 
     try:
         result = await initialize_transaction(
@@ -140,7 +242,8 @@ async def create_subscription_checkout(
             detail=str(exc),
         ) from exc
 
-    reference = result["data"].get("reference")
+    data = result.get("data") or {}
+    reference = data.get("reference")
 
     if not reference:
         raise HTTPException(
@@ -170,8 +273,8 @@ async def create_subscription_checkout(
     db.commit()
 
     return {
-        "authorization_url": result["data"]["authorization_url"],
-        "access_code": result["data"].get("access_code"),
+        "authorization_url": data.get("authorization_url"),
+        "access_code": data.get("access_code"),
         "reference": reference,
         "plan": plan,
     }
@@ -203,10 +306,14 @@ async def verify_payment(
     current_user: DBUser = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
-    subscription = db.query(DBSubscription).filter(
-        DBSubscription.reference == reference,
-        DBSubscription.user_id == current_user.id,
-    ).first()
+    subscription = (
+        db.query(DBSubscription)
+        .filter(
+            DBSubscription.reference == reference,
+            DBSubscription.user_id == current_user.id,
+        )
+        .first()
+    )
 
     if not subscription:
         raise HTTPException(
@@ -222,7 +329,7 @@ async def verify_payment(
             detail=str(exc),
         ) from exc
 
-    data = result.get("data", {})
+    data = result.get("data") or {}
 
     if data.get("status") != "success":
         return {
@@ -231,26 +338,73 @@ async def verify_payment(
         }
 
     subscription.status = "active"
+
+    authorization = data.get("authorization") or {}
+    customer = data.get("customer") or {}
+
     subscription.authorization_code = (
-        data.get("authorization") or {}
-    ).get("authorization_code")
-    subscription.paystack_customer_code = (
-        data.get("customer") or {}
-    ).get("customer_code")
-    subscription.paystack_subscription_code = data.get(
-        "subscription_code"
+        authorization.get("authorization_code")
     )
+
+    subscription.paystack_customer_code = (
+        customer.get("customer_code")
+    )
+
+    subscription.paystack_subscription_code = (
+        data.get("subscription_code")
+    )
+
     subscription.updated_at = now_utc()
     subscription.last_event = "transaction.verify"
 
     current_user.plan = subscription.plan
     current_user.subscription_status = "active"
+
+    # The transaction verification response can contain the subscription
+    # code, but the authoritative billing-period dates are on the
+    # subscription resource. Fetch it when available.
+    subscription_data = None
+
+    if subscription.paystack_subscription_code:
+        try:
+            subscription_result = await fetch_subscription(
+                subscription.paystack_subscription_code
+            )
+            subscription_data = (
+                subscription_result.get("data") or {}
+            )
+        except PaystackError:
+            # Payment itself was verified successfully. Don't turn a
+            # successful payment into a 502 just because the follow-up
+            # subscription lookup failed. The webhook can fill the dates.
+            subscription_data = None
+
+    if subscription_data:
+        update_subscription_period(
+            current_user,
+            subscription,
+            subscription_data,
+        )
+
+        # Keep the email token available for subscription operations.
+        subscription.paystack_email_token = (
+            subscription_data.get("email_token")
+        )
+
+        subscription.cancel_at_period_end = (
+            str(subscription_data.get("status", "")).lower()
+            == "non-renewing"
+        )
+
     db.commit()
 
     return {
         "status": "success",
         "plan": current_user.plan,
         "subscription_status": current_user.subscription_status,
+        "subscription_ends_at": (
+            current_user.subscription_ends_at
+        ),
         "reference": reference,
     }
 
@@ -260,13 +414,6 @@ async def manage_subscription(
     current_user: DBUser = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
-    """Return Paystack's hosted subscription-management link.
-
-    For paid users, recover a missing local Paystack subscription code from
-    the customer's Paystack subscriptions before returning 404. This makes
-    the endpoint resilient when a webhook was missed or an older payment was
-    verified before the subscription code was persisted locally.
-    """
     subscription = current_user.subscription
 
     if not subscription:
@@ -278,15 +425,19 @@ async def manage_subscription(
     if current_user.plan not in PAID_PLANS:
         raise HTTPException(
             status_code=400,
-            detail="Starter is a free plan and has no subscription to manage",
+            detail=(
+                "Starter is a free plan and has no subscription to manage"
+            ),
         )
 
     subscription_code = subscription.paystack_subscription_code
 
-    # Recover the Paystack subscription code if it is missing locally.
-    if not subscription_code and subscription.paystack_customer_code:
+    if (
+        not subscription_code
+        and subscription.paystack_customer_code
+    ):
         try:
-            result = await fetch_customer_subscriptions(
+            result = await fetch_customer_subscriptions_by_code(
                 subscription.paystack_customer_code
             )
         except PaystackError as exc:
@@ -297,14 +448,15 @@ async def manage_subscription(
 
         paystack_subscriptions = result.get("data") or []
 
-        # Prefer the subscription matching this user's current plan.
         matching = next(
             (
                 item
                 for item in paystack_subscriptions
                 if str(item.get("status", "")).lower()
                 in {"active", "non-renewing"}
-                and str(item.get("plan", {}).get("name", "")).lower()
+                and str(
+                    (item.get("plan") or {}).get("name", "")
+                ).lower()
                 == current_user.plan.lower()
             ),
             None,
@@ -314,11 +466,34 @@ async def manage_subscription(
             matching = paystack_subscriptions[0]
 
         if matching:
-            subscription_code = matching.get("subscription_code")
-            subscription.paystack_subscription_code = subscription_code
+            subscription_code = matching.get(
+                "subscription_code"
+            )
+
+            subscription.paystack_subscription_code = (
+                subscription_code
+            )
+
             subscription.status = str(
-                matching.get("status") or subscription.status
+                matching.get(
+                    "status",
+                    subscription.status,
+                )
             ).lower()
+
+            customer = matching.get("customer") or {}
+
+            if customer.get("customer_code"):
+                subscription.paystack_customer_code = (
+                    customer.get("customer_code")
+                )
+
+            update_subscription_period(
+                current_user,
+                subscription,
+                matching,
+            )
+
             subscription.updated_at = now_utc()
             db.commit()
 
@@ -328,8 +503,50 @@ async def manage_subscription(
             detail="No active Paystack subscription found",
         )
 
+    # Refresh the subscription from Paystack so subscription_ends_at stays
+    # accurate even if a webhook was delayed or missed.
     try:
-        result = await get_subscription_manage_link(subscription_code)
+        subscription_result = await fetch_subscription(
+            subscription_code
+        )
+        subscription_data = (
+            subscription_result.get("data") or {}
+        )
+    except PaystackError as exc:
+        raise HTTPException(
+            status_code=502,
+            detail=str(exc),
+        ) from exc
+
+    update_subscription_period(
+        current_user,
+        subscription,
+        subscription_data,
+    )
+
+    subscription.status = str(
+        subscription_data.get(
+            "status",
+            subscription.status,
+        )
+    ).lower()
+
+    subscription.paystack_email_token = (
+        subscription_data.get("email_token")
+    )
+
+    subscription.cancel_at_period_end = (
+        subscription.status == "non-renewing"
+    )
+
+    subscription.updated_at = now_utc()
+
+    db.commit()
+
+    try:
+        result = await get_subscription_manage_link(
+            subscription_code
+        )
     except PaystackError as exc:
         raise HTTPException(
             status_code=502,
@@ -341,29 +558,40 @@ async def manage_subscription(
     if not link:
         raise HTTPException(
             status_code=502,
-            detail="Paystack did not return a subscription management link",
+            detail=(
+                "Paystack did not return "
+                "a subscription management link"
+            ),
         )
 
     return {
         "link": link,
         "plan": current_user.plan,
         "subscription_status": current_user.subscription_status,
+        "subscription_ends_at": current_user.subscription_ends_at,
         "subscription_code": subscription_code,
     }
 
 
-@router.post("/webhook", status_code=status.HTTP_200_OK)
+@router.post(
+    "/webhook",
+    status_code=status.HTTP_200_OK,
+)
 async def paystack_webhook(
     request: Request,
     db: Session = Depends(get_db),
 ):
     raw_body = await request.body()
+
     signature = request.headers.get(
         "x-paystack-signature",
         "",
     )
 
-    if not verify_webhook_signature(raw_body, signature):
+    if not verify_webhook_signature(
+        raw_body,
+        signature,
+    ):
         raise HTTPException(
             status_code=401,
             detail="Invalid webhook signature",
@@ -373,7 +601,10 @@ async def paystack_webhook(
         payload = json.loads(
             raw_body.decode("utf-8")
         )
-    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+    except (
+        UnicodeDecodeError,
+        json.JSONDecodeError,
+    ) as exc:
         raise HTTPException(
             status_code=400,
             detail="Invalid webhook payload",
