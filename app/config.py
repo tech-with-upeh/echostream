@@ -25,10 +25,8 @@ class Settings(BaseSettings):
     FRONTEND_URL: str
     GOOGLE_CLIENT_ID: str
 
-    # Paystack
     PAYSTACK_SECRET_KEY: str
     PAYSTACK_PUBLIC_KEY: str = ""
-    PAYSTACK_STARTER_PLAN_CODE: str
     PAYSTACK_ESSENTIAL_PLAN_CODE: str
     PAYSTACK_PRO_PLAN_CODE: str
     PAYSTACK_CALLBACK_URL: str
