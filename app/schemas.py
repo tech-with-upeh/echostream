@@ -18,7 +18,6 @@ class UserResponse(BaseModel):
     last_name: str
     email: EmailStr
     is_verified: bool
-
     plan: str
     subscription_status: str
     trial_ends_at: Optional[datetime] = None

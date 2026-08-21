@@ -2,7 +2,7 @@ import edge_tts
 from fastapi import APIRouter, Depends
 from typing import List
 
-from app.dependencies import get_current_user
+from app.dependencies import get_current_user, require_active_subscription
 from app.models import DBUser
 from app.schemas import TTSTextPayloadSchema, VoiceDetailSchema
 
@@ -28,9 +28,9 @@ async def get_all_edge_voices() -> List[VoiceDetailSchema]:
     return CACHED_VOICES
 
 
-async def tts_streaming_generator(text: str, voice: str, pitch: str = "+0Hz"):
+async def tts_streaming_generator(text: str, voice: str):
     """Asynchronously streams native binary audio chunks from edge-tts."""
-    communicate = edge_tts.Communicate(text, voice, pitch=pitch)
+    communicate = edge_tts.Communicate(text, voice)
     async for chunk in communicate.stream():
         if chunk["type"] == "audio":
             yield chunk["data"]
@@ -49,7 +49,7 @@ async def list_voices(current_user: DBUser = Depends(get_current_user)):
 @router.post("/v1/tts")
 async def text_to_speech(
     payload: TTSTextPayloadSchema,
-    current_user: DBUser = Depends(get_current_user)
+    current_user: DBUser = Depends(require_active_subscription)
 ):
     """
     Protected endpoint to convert text to speech. 
