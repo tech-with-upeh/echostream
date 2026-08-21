@@ -47,6 +47,20 @@ def parse_paystack_datetime(value) -> datetime | None:
     return parsed if parsed.tzinfo else parsed.replace(tzinfo=timezone.utc)
 
 
+def get_metadata(subscription: DBSubscription) -> dict:
+    if not subscription.metadata_json:
+        return {}
+    try:
+        value = json.loads(subscription.metadata_json)
+        return value if isinstance(value, dict) else {}
+    except json.JSONDecodeError:
+        return {}
+
+
+def set_metadata(subscription: DBSubscription, value: dict) -> None:
+    subscription.metadata_json = json.dumps(value)
+
+
 def update_subscription_period(user: DBUser, subscription: DBSubscription, data: dict) -> None:
     start = parse_paystack_datetime(data.get("start") or data.get("current_period_start"))
     end = parse_paystack_datetime(data.get("next_payment_date") or data.get("current_period_end"))
@@ -57,30 +71,105 @@ def update_subscription_period(user: DBUser, subscription: DBSubscription, data:
         user.subscription_ends_at = end
 
 
-def apply_subscription_event(db: Session, event: str, data: dict) -> None:
-    subscription_code = data.get("subscription_code")
-    customer = data.get("customer") or {}
-    customer_code = customer.get("customer_code") if isinstance(customer, dict) else None
-    metadata = data.get("metadata") or {}
-    user_id = metadata.get("user_id") if isinstance(metadata, dict) else None
-
-    subscription = None
+def find_subscription_for_event(db: Session, subscription_code: str | None, data: dict) -> tuple[DBSubscription | None, bool]:
+    """Return (subscription, is_pending_replacement)."""
     if subscription_code:
         subscription = db.query(DBSubscription).filter(
             DBSubscription.paystack_subscription_code == subscription_code
         ).first()
+        if subscription:
+            return subscription, False
 
-    if not subscription and user_id:
+    # A scheduled replacement is deliberately not stored in
+    # paystack_subscription_code until its first successful charge. This lets
+    # the current subscription remain the DB source of truth during the old
+    # billing period and avoids the unique constraint collision.
+    if subscription_code:
+        subscriptions = db.query(DBSubscription).filter(
+            DBSubscription.metadata_json.like(f'%"pending_subscription_code": "{subscription_code}"%')
+        ).all()
+        if subscriptions:
+            return subscriptions[0], True
+
+    metadata = data.get("metadata") or {}
+    user_id = metadata.get("user_id") if isinstance(metadata, dict) else None
+    if user_id:
         try:
             subscription = db.query(DBSubscription).filter(
                 DBSubscription.user_id == int(user_id)
             ).first()
+            if subscription:
+                return subscription, False
         except (TypeError, ValueError):
-            subscription = None
+            pass
 
+    return None, False
+
+
+def finalize_pending_change(
+    db: Session,
+    subscription: DBSubscription,
+    new_subscription_code: str,
+    data: dict,
+) -> None:
+    metadata = get_metadata(subscription)
+    pending_plan = metadata.get("pending_plan")
+    pending_interval = metadata.get("pending_interval")
+    old_code = metadata.get("old_subscription_code")
+
+    if pending_plan not in PAID_PLANS or pending_interval not in VALID_INTERVALS:
+        return
+
+    # The old Paystack subscription was disabled when the change was
+    # scheduled. Now that the replacement has actually charged successfully,
+    # atomically promote the replacement to the active local subscription.
+    subscription.paystack_subscription_code = None
+    db.flush()
+    subscription.paystack_subscription_code = new_subscription_code
+    subscription.plan = pending_plan
+    subscription.status = "active"
+    subscription.cancel_at_period_end = False
+    subscription.last_event = "subscription.change.finalized"
+
+    metadata.pop("pending_plan", None)
+    metadata.pop("pending_interval", None)
+    metadata.pop("pending_subscription_code", None)
+    metadata.pop("pending_start_date", None)
+    metadata.pop("old_subscription_code", None)
+    metadata["interval"] = pending_interval
+    set_metadata(subscription, metadata)
+
+    user = subscription.user
+    user.plan = pending_plan
+    user.subscription_status = "active"
+    update_subscription_period(user, subscription, data)
+    subscription.updated_at = now_utc()
+
+    if data.get("authorization"):
+        subscription.authorization_code = data["authorization"].get("authorization_code") or subscription.authorization_code
+    customer = data.get("customer") or {}
+    if customer.get("customer_code"):
+        subscription.paystack_customer_code = customer["customer_code"]
+
+
+def apply_subscription_event(db: Session, event: str, data: dict) -> None:
+    subscription_code = data.get("subscription_code")
+    subscription, is_pending = find_subscription_for_event(db, subscription_code, data)
+
+    # subscription.create for a scheduled replacement must NOT activate it:
+    # Paystack may emit this when the replacement is created, before its first
+    # debit. We only finalize after charge.success.
+    if is_pending and event == "charge.success":
+        finalize_pending_change(db, subscription, subscription_code, data)
+        db.commit()
+        return
+    if is_pending:
+        return
     if not subscription:
         return
 
+    customer = data.get("customer") or {}
+    customer_code = customer.get("customer_code") if isinstance(customer, dict) else None
     subscription.last_event = event
     subscription.updated_at = now_utc()
     if customer_code:
@@ -126,7 +215,6 @@ async def create_subscription_checkout(
 ):
     plan = plan.lower().strip()
     interval = interval.lower().strip()
-
     if plan == "starter":
         raise HTTPException(status_code=400, detail="Starter is the free plan and does not require payment.")
     if plan not in PAID_PLANS:
@@ -137,7 +225,6 @@ async def create_subscription_checkout(
         raise HTTPException(status_code=400, detail=f"You are already subscribed to the {plan} plan.")
 
     reference = f"echostream_{current_user.id}_{uuid.uuid4().hex}"
-
     try:
         result = await initialize_transaction(
             email=current_user.email,
@@ -173,8 +260,8 @@ async def create_subscription_checkout(
         subscription.reference = reference
         subscription.metadata_json = json.dumps({"interval": interval})
         subscription.updated_at = timestamp
-
     db.commit()
+
     return {
         "authorization_url": data.get("authorization_url"),
         "access_code": data.get("access_code"),
@@ -255,25 +342,18 @@ async def manage_subscription(current_user: DBUser = Depends(get_current_user), 
             result = await fetch_customer_subscriptions_by_code(subscription.paystack_customer_code)
         except PaystackError as exc:
             raise HTTPException(status_code=502, detail=str(exc)) from exc
-
         subscriptions = result.get("data") or []
         matching = next(
-            (
-                item for item in subscriptions
-                if str(item.get("status", "")).lower() in {"active", "non-renewing"}
-                and str((item.get("plan") or {}).get("name", "")).lower() == current_user.plan.lower()
-            ),
+            (item for item in subscriptions if str(item.get("status", "")).lower() in {"active", "non-renewing"}),
             None,
         )
-        if matching is None and subscriptions:
-            matching = subscriptions[0]
         if matching:
             subscription_code = matching.get("subscription_code")
             subscription.paystack_subscription_code = subscription_code
             subscription.status = str(matching.get("status", subscription.status)).lower()
             customer = matching.get("customer") or {}
             if customer.get("customer_code"):
-                subscription.paystack_customer_code = customer.get("customer_code")
+                subscription.paystack_customer_code = customer["customer_code"]
             update_subscription_period(current_user, subscription, matching)
             subscription.updated_at = now_utc()
             db.commit()
@@ -337,7 +417,6 @@ async def fetch_usd_ngn_rate() -> float:
 
 @router.post("/admin/sync-plans")
 async def sync_paystack_plans(x_plan_sync_secret: str | None = Header(default=None)):
-    """Create/update the four paid Paystack plans from the current USD/NGN rate."""
     if not settings.PAYSTACK_PLAN_SYNC_SECRET:
         raise HTTPException(status_code=503, detail="PAYSTACK_PLAN_SYNC_SECRET is not configured")
     if x_plan_sync_secret != settings.PAYSTACK_PLAN_SYNC_SECRET:
@@ -355,7 +434,6 @@ async def sync_paystack_plans(x_plan_sync_secret: str | None = Header(default=No
         "pro_year": settings.PAYSTACK_PRO_YEARLY_USD,
     }
     desired = {key: round(value * rate) for key, value in usd_prices.items()}
-
     configs = [
         ("essential_month", "PAYSTACK_ESSENTIAL_MONTHLY_PLAN_CODE", "EchoStream Essential Monthly", "monthly"),
         ("essential_year", "PAYSTACK_ESSENTIAL_YEARLY_PLAN_CODE", "EchoStream Essential Yearly", "annually"),
@@ -367,7 +445,6 @@ async def sync_paystack_plans(x_plan_sync_secret: str | None = Header(default=No
     for key, setting_name, name, interval in configs:
         current_code = getattr(settings, setting_name)
         amount = desired[key]
-
         try:
             if not current_code:
                 created = await create_plan(
@@ -376,13 +453,7 @@ async def sync_paystack_plans(x_plan_sync_secret: str | None = Header(default=No
                     interval=interval,
                     description=f"EchoStream {name} - USD anchor ${usd_prices[key]:.2f}",
                 )
-                results.append({
-                    "plan": key,
-                    "action": "created",
-                    "amount_naira": amount,
-                    "plan_code": (created.get("data") or {}).get("plan_code"),
-                    "note": "Save this returned plan_code in .env before the next sync.",
-                })
+                results.append({"plan": key, "action": "created", "amount_naira": amount, "plan_code": (created.get("data") or {}).get("plan_code")})
                 continue
 
             existing = await paystack_request("GET", f"/plan/{current_code}")
@@ -390,28 +461,13 @@ async def sync_paystack_plans(x_plan_sync_secret: str | None = Header(default=No
             current_amount = int(current_data.get("amount") or 0) / 100
             if current_amount <= 0:
                 raise PaystackError("Paystack plan has no valid amount")
-
             change_percent = abs(amount - current_amount) / current_amount * 100
             action = "unchanged"
             if change_percent >= settings.PAYSTACK_PRICE_CHANGE_THRESHOLD_PERCENT:
                 await update_plan(current_code, amount_naira=amount)
                 action = "updated"
-
-            results.append({
-                "plan": key,
-                "action": action,
-                "amount_naira": amount,
-                "previous_amount_naira": current_amount,
-                "change_percent": round(change_percent, 2),
-                "plan_code": current_code,
-            })
+            results.append({"plan": key, "action": action, "amount_naira": amount, "previous_amount_naira": current_amount, "change_percent": round(change_percent, 2), "plan_code": current_code})
         except PaystackError as exc:
             raise HTTPException(status_code=502, detail=str(exc)) from exc
 
-    return {
-        "status": "success",
-        "currency": "NGN",
-        "usd_ngn_rate": rate,
-        "threshold_percent": settings.PAYSTACK_PRICE_CHANGE_THRESHOLD_PERCENT,
-        "plans": results,
-    }
+    return {"status": "success", "currency": "NGN", "usd_ngn_rate": rate, "threshold_percent": settings.PAYSTACK_PRICE_CHANGE_THRESHOLD_PERCENT, "plans": results}
