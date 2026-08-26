@@ -5,6 +5,7 @@ from fastapi import APIRouter, Depends, File, HTTPException, UploadFile
 from fastapi.responses import StreamingResponse
 from sqlalchemy.orm import Session
 
+from app.config import settings
 from app.dependencies import get_current_user, get_db, require_active_subscription, require_pro_subscription
 from app.fish_audio import FishAudioError, create_voice_clone, stream_tts
 from app.models import DBUser, DBUserPreferences
