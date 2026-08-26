@@ -7,8 +7,8 @@ from sqlalchemy.orm import Session
 
 from app.config import settings
 from app.dependencies import get_current_user, get_db, require_active_subscription, require_pro_subscription
-from app.fish_audio import FishAudioError, create_voice_clone, list_voice_models, stream_tts
-from app.models import DBUser, DBUserPreferences
+from app.fish_audio import FishAudioError, create_voice_clone, list_owned_voice_models, list_voice_models, stream_tts
+from app.models import DBFishVoice, DBUser, DBUserPreferences
 from app.schemas import (
     FishVoiceCloneResponse,
     FishVoiceDetailSchema,
@@ -42,16 +42,20 @@ async def tts_streaming_generator(text: str, voice: str, pitch: str = "+0Hz"):
             yield chunk["data"]
 
 
-@router.get("/v1/tts/voices", response_model=TTSVoiceCatalogSchema)
-async def list_voices(
-    current_user: DBUser = Depends(get_current_user),
-):
-    """Return the voice catalog available to this user.
+def _fish_voice_response(model: dict) -> FishVoiceDetailSchema:
+    return FishVoiceDetailSchema(
+        id=model["_id"],
+        name=model.get("title") or "Untitled Fish voice",
+        voice_type=("cloned" if model.get("visibility") == "private" else "library"),
+        description=model.get("description") or "",
+        languages=model.get("languages") or [],
+        visibility=model.get("visibility") or "public",
+    )
 
-    Edge voices are available to everyone. Fish voices are returned for Pro
-    users and include public library models plus models owned by the Fish API
-    workspace (including EchoStream-created private clones).
-    """
+
+@router.get("/v1/tts/voices", response_model=TTSVoiceCatalogSchema)
+async def list_voices(current_user: DBUser = Depends(get_current_user)):
+    """Return the public voice catalog available to the current user."""
     edge_voices = await get_all_edge_voices()
 
     if current_user.plan.lower() != "pro":
@@ -62,20 +66,24 @@ async def list_voices(
     except FishAudioError as exc:
         raise HTTPException(status_code=502, detail=str(exc)) from exc
 
-    fish_voices = [
-        FishVoiceDetailSchema(
-            id=model["_id"],
-            name=model.get("title") or "Untitled Fish voice",
-            voice_type=("cloned" if model.get("visibility") == "private" else "library"),
-            description=model.get("description") or "",
-            languages=model.get("languages") or [],
-            visibility=model.get("visibility") or "public",
-        )
-        for model in fish_models
-        if model.get("state") in {None, "created", "trained"}
-    ]
-
+    fish_voices = [_fish_voice_response(model) for model in fish_models if model.get("state") in {None, "created", "trained"}]
     return TTSVoiceCatalogSchema(edge=edge_voices, fish=fish_voices)
+
+
+@router.get("/v1/tts/fish/voices", response_model=list[FishVoiceDetailSchema])
+async def list_fish_cloned_voices(current_user: DBUser = Depends(require_pro_subscription)):
+    """Return only Fish Audio voices owned by the EchoStream Fish workspace."""
+    try:
+        fish_models = await list_owned_voice_models()
+    except FishAudioError as exc:
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
+
+    return [
+        _fish_voice_response(model)
+        for model in fish_models
+        if model.get("visibility") == "private"
+        and model.get("state") in {None, "created", "trained"}
+    ]
 
 
 @router.post("/v1/tts")
