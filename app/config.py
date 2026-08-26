@@ -45,7 +45,7 @@ class Settings(BaseSettings):
     # Fish Audio is a server-side integration. Never expose this key to the client.
     FISH_AUDIO_API_KEY: str = ""
     FISH_AUDIO_BASE_URL: str = "https://api.fish.audio"
-    # Current production model. The free variant uses the same /v1/tts endpoint.
+    # Override these in .env when testing a specific Fish model.
     FISH_AUDIO_PRO_MODEL: str = "s2-pro"
     FISH_AUDIO_FREE_MODEL: str = "s2.1-pro-free"
     FISH_AUDIO_DEFAULT_FORMAT: str = "mp3"
