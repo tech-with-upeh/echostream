@@ -33,10 +33,7 @@ async def stream_tts(
     """Stream Fish Audio TTS bytes without exposing the provider key to clients."""
     selected_model = model or settings.FISH_AUDIO_PRO_MODEL
 
-    body: dict[str, object] = {
-        "text": text,
-        "format": settings.FISH_AUDIO_DEFAULT_FORMAT,
-    }
+    body: dict[str, object] = {"text": text, "format": settings.FISH_AUDIO_DEFAULT_FORMAT}
     if reference_id:
         body["reference_id"] = reference_id
     if speed != 1.0:
@@ -62,9 +59,7 @@ async def stream_tts(
                             "a current Fish Audio API key and that the free model is "
                             "available to your account."
                         )
-                    raise FishAudioError(
-                        f"Fish Audio TTS failed ({response.status_code}): {detail}"
-                    )
+                    raise FishAudioError(f"Fish Audio TTS failed ({response.status_code}): {detail}")
                 async for chunk in response.aiter_bytes():
                     if chunk:
                         yield chunk
@@ -87,14 +82,11 @@ async def list_voice_models(page_size: int = 50) -> list[dict]:
                 {"page_size": page_size, "page_number": 1, "self": "true", "sort_by": "created_at"},
             ):
                 response = await client.get(
-                    f"{settings.FISH_AUDIO_BASE_URL}/model",
-                    headers=headers,
-                    params=params,
+                    f"{settings.FISH_AUDIO_BASE_URL}/model", headers=headers, params=params
                 )
                 if response.status_code >= 400:
-                    detail = response.text
                     raise FishAudioError(
-                        f"Fish Audio voice list failed ({response.status_code}): {detail}"
+                        f"Fish Audio voice list failed ({response.status_code}): {response.text}"
                     )
 
                 payload = response.json()
@@ -111,6 +103,33 @@ async def list_voice_models(page_size: int = 50) -> list[dict]:
     return list(unique.values())
 
 
+async def list_owned_voice_models(page_size: int = 50) -> list[dict]:
+    """Return only Fish voice models owned by the EchoStream Fish workspace."""
+    if not settings.FISH_AUDIO_API_KEY:
+        raise FishAudioError("Fish Audio is not configured. Set FISH_AUDIO_API_KEY.")
+
+    headers = {"Authorization": f"Bearer {settings.FISH_AUDIO_API_KEY}"}
+    async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
+        try:
+            response = await client.get(
+                f"{settings.FISH_AUDIO_BASE_URL}/model",
+                headers=headers,
+                params={"page_size": page_size, "page_number": 1, "self": "true", "sort_by": "created_at"},
+            )
+            if response.status_code >= 400:
+                raise FishAudioError(
+                    f"Fish Audio cloned voice list failed ({response.status_code}): {response.text}"
+                )
+            payload = response.json()
+            return [
+                model
+                for model in payload.get("items", [])
+                if model.get("_id") and model.get("type", "tts") in {"tts", "svc"}
+            ]
+        except httpx.HTTPError as exc:
+            raise FishAudioError(f"Fish Audio cloned voice list request failed: {exc}") from exc
+
+
 async def create_voice_clone(
     title: str,
     audio: BinaryIO,
@@ -121,9 +140,7 @@ async def create_voice_clone(
     if not settings.FISH_AUDIO_API_KEY:
         raise FishAudioError("Fish Audio is not configured. Set FISH_AUDIO_API_KEY.")
 
-    files = {
-        "voices": (filename, audio, content_type or "application/octet-stream"),
-    }
+    files = {"voices": (filename, audio, content_type or "application/octet-stream")}
     data = {
         "type": "tts",
         "title": title,
@@ -143,9 +160,8 @@ async def create_voice_clone(
                 files=files,
             )
             if response.status_code >= 400:
-                detail = response.text
                 raise FishAudioError(
-                    f"Fish Audio voice cloning failed ({response.status_code}): {detail}"
+                    f"Fish Audio voice cloning failed ({response.status_code}): {response.text}"
                 )
             payload = response.json()
             voice_id = payload.get("_id")
