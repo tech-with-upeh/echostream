@@ -81,6 +81,22 @@ class PreferencesSchema(BaseModel):
     fish_voice_id: str | None = None
     fish_model: str = Field("s2-pro", pattern="^(s2-pro|s2\.1-pro-free)$")
     pitch: str = "+0Hz"
+    volume: int = Field(100, ge=0, le=100)
+    speed: int = Field(100, ge=50, le=200)
+    emoji_to_words: bool = False
+    filter_profanity: bool = False
+    require_command_prefix: bool = False
+    max_message_length: int = Field(100, ge=1, le=500)
+    speech_prefix_enabled: bool = False
+    speech_prefix_template: str = "{{user}} said {{comment}}"
+    allowed_user_types: list[str] = Field(default_factory=lambda: ["all"])
+    minimum_account_age_days: int = Field(1, ge=0, le=3650)
+    blocked_words: list[str] = Field(default_factory=list)
+    spam_protection_enabled: bool = False
+    block_repeated_words: bool = True
+    auto_mute_repeat_offenders: bool = False
+    spam_cooldown_seconds: int = Field(2, ge=1, le=60)
+    spam_max_requests_per_minute: int = Field(10, ge=1, le=120)
     class Config:
         from_attributes = True
 
