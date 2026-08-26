@@ -59,6 +59,19 @@ class VoiceDetailSchema(BaseModel):
     gender: str
     locale: str
 
+class FishVoiceDetailSchema(BaseModel):
+    id: str
+    name: str
+    provider: str = "fish"
+    voice_type: str = "library"
+    description: str = ""
+    languages: list[str] = Field(default_factory=list)
+    visibility: str = "public"
+
+class TTSVoiceCatalogSchema(BaseModel):
+    edge: List[VoiceDetailSchema]
+    fish: List[FishVoiceDetailSchema] = Field(default_factory=list)
+
 class PreferencesSchema(BaseModel):
     tiktok_username: str | None = None
     comment_prefix: str = ""
