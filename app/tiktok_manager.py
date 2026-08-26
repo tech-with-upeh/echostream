@@ -1,36 +1,179 @@
 import asyncio
+import re
+import time
+from collections import defaultdict, deque
+from datetime import datetime, timezone
 from typing import Dict
+
 from sqlalchemy.orm import Session
 from TikTokLive import TikTokLiveClient
 from TikTokLive.events import CommentEvent, DisconnectEvent
 
 from app.database import SessionLocal
-from app.models import DBUserPreferences
+from app.models import DBMutedUser, DBUser, DBUserPreferences
 
 active_sessions: Dict[int, asyncio.Queue] = {}
 active_tiktok_clients: Dict[int, TikTokLiveClient] = {}
 
+# Per EchoStream user -> TikTok username state. This is intentionally in-memory for the
+# live connection; Redis can replace this later when multiple workers are introduced.
+_request_times: dict[tuple[int, str], deque[float]] = defaultdict(deque)
+_last_request_at: dict[tuple[int, str], float] = {}
+_repeat_violations: dict[tuple[int, str], int] = defaultdict(int)
 
-def _load_preferences(user_id: int) -> DBUserPreferences:
+# Deliberately conservative fallback list. User-configured blocked_words is the primary
+# moderation mechanism; this only backs filter_profanity when enabled.
+_PROFANITY = {"fuck", "fucking", "shit", "bitch", "asshole", "motherfucker"}
+
+
+def _load_user_and_preferences(user_id: int) -> tuple[DBUser | None, DBUserPreferences | None]:
     db: Session = SessionLocal()
     try:
+        user = db.query(DBUser).filter(DBUser.id == user_id).first()
         prefs = db.query(DBUserPreferences).filter(DBUserPreferences.user_id == user_id).first()
-        if prefs is None:
-            prefs = DBUserPreferences(user_id=user_id)  # in-memory default, not saved
-        return prefs
+        return user, prefs
     finally:
         db.close()
 
 
-def _apply_template(template: str, username: str) -> str:
-    return template.replace("{username}", username)
+def _apply_template(template: str, username: str, comment: str = "") -> str:
+    return (template or "").replace("{{user}}", username).replace("{{username}}", username).replace("{{comment}}", comment)
+
+
+def _normalise_words(value: str | None) -> list[str]:
+    return [part.strip().lower() for part in (value or "").split(",") if part.strip()]
+
+
+def _contains_blocked_word(text: str, words: list[str]) -> bool:
+    lowered = text.lower()
+    return any(re.search(rf"(?<!\w){re.escape(word)}(?!\w)", lowered) for word in words)
+
+
+def _contains_repeated_words(text: str, minimum: int = 3) -> bool:
+    words = re.findall(r"[\w']+", text.lower())
+    if len(words) < minimum:
+        return False
+    run = 1
+    previous = words[0]
+    for word in words[1:]:
+        if word == previous:
+            run += 1
+            if run >= minimum:
+                return True
+        else:
+            previous = word
+            run = 1
+    return False
+
+
+def _contains_profanity(text: str) -> bool:
+    return _contains_blocked_word(text, list(_PROFANITY))
+
+
+def _user_role(event: CommentEvent) -> str:
+    user = event.user
+    # TikTokLive versions expose different shapes over time. Prefer explicit flags and
+    # fall back to common badge/role attributes without making the connection fragile.
+    if bool(getattr(user, "is_moderator", False) or getattr(user, "is_mod", False)):
+        return "moderators"
+    if bool(getattr(user, "is_subscriber", False) or getattr(user, "is_sub", False)):
+        return "subscribers"
+    if bool(getattr(user, "is_follower", False) or getattr(user, "is_following", False)):
+        return "followers"
+    return "all"
+
+
+def _allowed_user(event: CommentEvent, prefs: DBUserPreferences) -> bool:
+    allowed = (prefs.allowed_user_types or "all").strip().lower()
+    if allowed in {"", "all", '["all"]'}:
+        return True
+    role = _user_role(event)
+    configured = set(_normalise_words(allowed.strip("[]").replace('"', "").replace("'", "")))
+    return role in configured or (role == "all" and "all" in configured)
+
+
+def _account_age_days(event: CommentEvent) -> int | None:
+    user = event.user
+    created = getattr(user, "create_time", None) or getattr(user, "createTime", None)
+    if created is None:
+        return None
+    try:
+        if isinstance(created, (int, float)):
+            created_dt = datetime.fromtimestamp(created, tz=timezone.utc)
+        else:
+            created_dt = created if getattr(created, "tzinfo", None) else created.replace(tzinfo=timezone.utc)
+        return max(0, (datetime.now(timezone.utc) - created_dt).days)
+    except (TypeError, ValueError, OverflowError):
+        return None
+
+
+def _muted(user_id: int, tiktok_user_id: str | None, username: str) -> bool:
+    db: Session = SessionLocal()
+    try:
+        query = db.query(DBMutedUser).filter(DBMutedUser.owner_id == user_id)
+        if tiktok_user_id:
+            if query.filter(DBMutedUser.tiktok_user_id == tiktok_user_id).first():
+                return True
+        return query.filter(DBMutedUser.tiktok_username.ilike(username)).first() is not None
+    finally:
+        db.close()
+
+
+def _auto_mute(user_id: int, tiktok_user_id: str | None, username: str) -> None:
+    db: Session = SessionLocal()
+    try:
+        query = db.query(DBMutedUser).filter(DBMutedUser.owner_id == user_id)
+        existing = query.filter(DBMutedUser.tiktok_user_id == tiktok_user_id).first() if tiktok_user_id else query.filter(DBMutedUser.tiktok_username.ilike(username)).first()
+        if existing:
+            return
+        db.add(DBMutedUser(
+            owner_id=user_id,
+            tiktok_user_id=tiktok_user_id,
+            tiktok_username=username,
+            reason="spam",
+            created_at=datetime.now(timezone.utc).replace(tzinfo=None),
+        ))
+        db.commit()
+    finally:
+        db.close()
+
+
+def _spam_blocked(user_id: int, username: str, prefs: DBUserPreferences) -> tuple[bool, bool]:
+    """Return (blocked, should_auto_mute). Limits are per TikTok user."""
+    if not prefs.spam_protection_enabled:
+        return False, False
+
+    key = (user_id, username.lower())
+    now = time.monotonic()
+    cooldown = max(0, prefs.spam_cooldown_seconds)
+    max_per_minute = max(1, prefs.spam_max_requests_per_minute)
+
+    if cooldown and now - _last_request_at.get(key, 0.0) < cooldown:
+        _repeat_violations[key] += 1
+        return True, prefs.auto_mute_repeat_offenders and _repeat_violations[key] >= 3
+
+    timestamps = _request_times[key]
+    while timestamps and now - timestamps[0] >= 60:
+        timestamps.popleft()
+    if len(timestamps) >= max_per_minute:
+        _repeat_violations[key] += 1
+        return True, prefs.auto_mute_repeat_offenders and _repeat_violations[key] >= 3
+
+    timestamps.append(now)
+    _last_request_at[key] = now
+    return False, False
 
 
 async def start_tiktok_session(user_id: int, tiktok_username: str) -> None:
     if user_id in active_tiktok_clients:
         return
 
-    prefs = _load_preferences(user_id)
+    user, prefs = _load_user_and_preferences(user_id)
+    if user is None:
+        return
+    if prefs is None:
+        prefs = DBUserPreferences(user_id=user_id)
+
     client = TikTokLiveClient(unique_id=tiktok_username)
 
     @client.on(CommentEvent)
@@ -38,17 +181,81 @@ async def start_tiktok_session(user_id: int, tiktok_username: str) -> None:
         queue = active_sessions.get(user_id)
         if queue is None:
             return
+
+        # Reload preferences for each event so dashboard changes take effect without
+        # reconnecting the TikTok session.
+        _, current_prefs = _load_user_and_preferences(user_id)
+        if current_prefs is not None:
+            prefs = current_prefs
+
         msg_id = str(event.common.msg_id) if event.common else str(id(event))
         username = event.user.nickname if event.user else "someone"
-        prefix = _apply_template(prefs.comment_prefix or "", username)
-        suffix = _apply_template(prefs.comment_suffix or "", username)
-        spoken_text = f"{prefix}{event.comment}{suffix}"
+        tiktok_user_id = str(getattr(event.user, "user_id", None) or getattr(event.user, "uid", None) or "") or None
+        comment = (event.comment or "").strip()
+
+        if _muted(user_id, tiktok_user_id, username):
+            return
+
+        if not _allowed_user(event, prefs):
+            return
+
+        age_days = _account_age_days(event)
+        if age_days is not None and age_days < max(0, prefs.minimum_account_age_days):
+            return
+
+        if prefs.require_command_prefix:
+            command_prefix = prefs.comment_prefix or "!"
+            if not comment.startswith(command_prefix):
+                return
+            comment = comment[len(command_prefix):].lstrip()
+            if not comment:
+                return
+
+        if len(comment) > max(1, prefs.max_message_length):
+            return
+
+        blocked_words = _normalise_words(prefs.blocked_words)
+        if blocked_words and _contains_blocked_word(comment, blocked_words):
+            return
+
+        if prefs.filter_profanity and _contains_profanity(comment):
+            return
+
+        if prefs.spam_protection_enabled and prefs.block_repeated_words and _contains_repeated_words(comment):
+            key = (user_id, username.lower())
+            _repeat_violations[key] += 1
+            if prefs.auto_mute_repeat_offenders and _repeat_violations[key] >= 3:
+                _auto_mute(user_id, tiktok_user_id, username)
+            return
+
+        spammed, should_mute = _spam_blocked(user_id, username, prefs)
+        if spammed:
+            if should_mute:
+                _auto_mute(user_id, tiktok_user_id, username)
+            return
+
+        # Emoji-to-words is intentionally conservative until a dedicated emoji package
+        # is introduced. The preference is wired; existing emoji text is left untouched.
+        spoken_comment = comment
+        if prefs.speech_prefix_enabled:
+            spoken_comment = _apply_template(prefs.speech_prefix_template, username, spoken_comment)
+
+        provider = prefs.tts_provider or "edge"
+        voice = prefs.voice
+        fish_voice_id = prefs.fish_voice_id
+        fish_model = prefs.fish_model
+        speed = max(0.1, min(4.0, prefs.speed / 100.0))
         await queue.put({
             "id": msg_id,
             "event_type": "comment",
-            "text": spoken_text,
-            "voice": prefs.voice,
+            "text": spoken_comment,
+            "voice": voice,
+            "provider": provider,
+            "fish_voice_id": fish_voice_id,
+            "fish_model": fish_model,
             "pitch": prefs.pitch,
+            "speed": speed,
+            "volume": prefs.volume,
         })
 
     @client.on(DisconnectEvent)
@@ -78,3 +285,9 @@ async def stop_tiktok_session(user_id: int) -> None:
     client = active_tiktok_clients.pop(user_id, None)
     if client is not None:
         await client.disconnect()
+
+    # Drop in-memory moderation counters when the live session ends.
+    for key in [key for key in _request_times if key[0] == user_id]:
+        _request_times.pop(key, None)
+        _last_request_at.pop(key, None)
+        _repeat_violations.pop(key, None)
