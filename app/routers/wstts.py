@@ -29,12 +29,7 @@ def _get_user_from_token(token: str, db: Session):
 
 def _status_payload(item: dict, event: str) -> dict:
     event_type = item.get("event_type", "comment")
-    payload = {
-        "type": "status",
-        "id": item["id"],
-        "event": event,
-        "event_type": event_type,
-    }
+    payload = {"type": "status", "id": item["id"], "event": event, "event_type": event_type}
     if event_type == "comment":
         payload["comment"] = item["text"]
     return payload
@@ -67,7 +62,6 @@ async def live_tts_socket(websocket: WebSocket, token: str = Query(...)):
                     except json.JSONDecodeError:
                         await websocket.send_json({"type": "error", "detail": "Invalid JSON."})
                         continue
-
                     if msg.get("type") != "speak":
                         await websocket.send_json({"type": "error", "detail": "Unknown message type."})
                         continue
@@ -80,7 +74,9 @@ async def live_tts_socket(websocket: WebSocket, token: str = Query(...)):
                     provider = (msg.get("provider") or (prefs.tts_provider if prefs else "edge")).lower()
                     voice = msg.get("voice") or (prefs.voice if prefs else "en-US-GuyNeural")
                     pitch = prefs.pitch if prefs else "+0Hz"
-                    fish_voice_id = (prefs.fish_voice_id if prefs else None)
+                    fish_voice_id = prefs.fish_voice_id if prefs else None
+                    fish_model = msg.get("fish_model") or (prefs.fish_model if prefs else "s2-pro")
+                    speed = float(msg.get("speed", 1.0))
 
                     await queue.put({
                         "id": msg.get("id"),
@@ -89,14 +85,14 @@ async def live_tts_socket(websocket: WebSocket, token: str = Query(...)):
                         "provider": provider,
                         "voice": voice,
                         "fish_voice_id": fish_voice_id,
+                        "fish_model": fish_model,
                         "pitch": pitch,
-                        "speed": float(msg.get("speed", 1.0)),
+                        "speed": speed,
                     })
             except WebSocketDisconnect:
                 await queue.put(None)
 
         async def writer():
-            """Process one comment at a time so audio never overlaps."""
             while True:
                 item = await queue.get()
                 if item is None:
@@ -106,16 +102,17 @@ async def live_tts_socket(websocket: WebSocket, token: str = Query(...)):
                     if item["provider"] == "fish":
                         if user.plan.lower() != "pro":
                             raise PermissionError("Fish Audio is available on the Pro plan.")
+                        if item["fish_model"] not in {"s2-pro", "s2.1-pro-free"}:
+                            raise ValueError("Unsupported Fish Audio model.")
                         async for chunk in stream_tts(
                             item["text"],
                             reference_id=item.get("fish_voice_id") or item.get("voice"),
+                            model=item["fish_model"],
                             speed=item["speed"],
                         ):
                             await websocket.send_bytes(chunk)
                     elif item["provider"] == "edge":
-                        async for chunk in tts_streaming_generator(
-                            item["text"], item["voice"], item["pitch"]
-                        ):
+                        async for chunk in tts_streaming_generator(item["text"], item["voice"], item["pitch"]):
                             await websocket.send_bytes(chunk)
                     else:
                         raise ValueError("Unsupported TTS provider.")
@@ -127,9 +124,7 @@ async def live_tts_socket(websocket: WebSocket, token: str = Query(...)):
 
         reader_task = asyncio.create_task(reader())
         writer_task = asyncio.create_task(writer())
-        done, pending = await asyncio.wait(
-            {reader_task, writer_task}, return_when=asyncio.FIRST_COMPLETED
-        )
+        _, pending = await asyncio.wait({reader_task, writer_task}, return_when=asyncio.FIRST_COMPLETED)
         for task in pending:
             task.cancel()
     finally:
