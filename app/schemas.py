@@ -50,7 +50,7 @@ class TTSTextPayloadSchema(BaseModel):
     text: str = Field(..., description="The text content you want to convert to speech")
     voice: str | None = Field(None, description="Edge voice name or Fish voice model ID")
     provider: str | None = Field(None, description="edge or fish; defaults to the user's preference")
-    fish_model: str | None = Field(None, description="s2-pro or s2.1-pro-free")
+    fish_model: str | None = Field(None, description="Fish model: s2-pro or s2.1-pro-free")
     speed: float = Field(1.0, ge=0.5, le=2.0)
 
 class VoiceDetailSchema(BaseModel):
