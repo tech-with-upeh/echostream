@@ -8,14 +8,9 @@ from sqlalchemy.orm import Session
 from app.dependencies import get_current_user, get_db, require_pro_subscription
 from app.fish_audio import FishAudioError, create_voice_clone, stream_tts
 from app.models import DBUser, DBUserPreferences
-from app.schemas import (
-    FishVoiceCloneResponse,
-    TTSTextPayloadSchema,
-    VoiceDetailSchema,
-)
+from app.schemas import FishVoiceCloneResponse, TTSTextPayloadSchema, VoiceDetailSchema
 
 router = APIRouter(tags=["Text-to-Speech"])
-
 CACHED_VOICES: List[VoiceDetailSchema] = []
 
 
@@ -25,21 +20,14 @@ async def get_all_edge_voices() -> List[VoiceDetailSchema]:
         all_voices = await edge_tts.list_voices()
         CACHED_VOICES = [
             VoiceDetailSchema(
-                name=v["Name"],
-                short_name=v["ShortName"],
-                gender=v["Gender"],
-                locale=v["Locale"],
+                name=v["Name"], short_name=v["ShortName"], gender=v["Gender"], locale=v["Locale"]
             )
             for v in all_voices
         ]
     return CACHED_VOICES
 
 
-async def tts_streaming_generator(
-    text: str,
-    voice: str,
-    pitch: str = "+0Hz",
-):
+async def tts_streaming_generator(text: str, voice: str, pitch: str = "+0Hz"):
     """Stream native Edge TTS audio chunks."""
     communicate = edge_tts.Communicate(text, voice, pitch=pitch)
     async for chunk in communicate.stream():
@@ -58,7 +46,7 @@ async def text_to_speech(
     current_user: DBUser = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
-    """TTS using the provider selected in the user's preferences."""
+    """TTS using the provider and Fish model selected in user preferences."""
     if not payload.text.strip():
         raise HTTPException(status_code=400, detail="Text parameter cannot be empty.")
 
@@ -68,9 +56,12 @@ async def text_to_speech(
     if provider == "fish":
         if current_user.plan.lower() != "pro":
             raise HTTPException(status_code=403, detail="Fish Audio is available on the Pro plan.")
+        model = payload.fish_model or (prefs.fish_model if prefs else "s2-pro")
+        if model not in {"s2-pro", "s2.1-pro-free"}:
+            raise HTTPException(status_code=400, detail="Unsupported Fish Audio model.")
         voice_id = payload.voice or (prefs.fish_voice_id if prefs else None)
         return StreamingResponse(
-            stream_tts(payload.text, reference_id=voice_id, speed=payload.speed),
+            stream_tts(payload.text, reference_id=voice_id, model=model, speed=payload.speed),
             media_type="audio/mpeg",
         )
 
@@ -79,10 +70,7 @@ async def text_to_speech(
 
     voice = payload.voice or (prefs.voice if prefs else "en-US-GuyNeural")
     pitch = prefs.pitch if prefs else "+0Hz"
-    return StreamingResponse(
-        tts_streaming_generator(payload.text, voice, pitch),
-        media_type="audio/mpeg",
-    )
+    return StreamingResponse(tts_streaming_generator(payload.text, voice, pitch), media_type="audio/mpeg")
 
 
 @router.post("/v1/tts/fish/clone", response_model=FishVoiceCloneResponse)
