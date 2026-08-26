@@ -75,7 +75,7 @@ async def live_tts_socket(websocket: WebSocket, token: str = Query(...)):
                     voice = msg.get("voice") or (prefs.voice if prefs else "en-US-GuyNeural")
                     pitch = prefs.pitch if prefs else "+0Hz"
                     fish_voice_id = prefs.fish_voice_id if prefs else None
-                    fish_model = msg.get("fish_model") or (prefs.fish_model if prefs else "s2-pro")
+                    fish_model = msg.get("fish_model") or (prefs.fish_model if prefs else settings.FISH_AUDIO_PRO_MODEL)
                     speed = float(msg.get("speed", 1.0))
 
                     await queue.put({
@@ -102,7 +102,7 @@ async def live_tts_socket(websocket: WebSocket, token: str = Query(...)):
                     if item["provider"] == "fish":
                         if user.plan.lower() != "pro":
                             raise PermissionError("Fish Audio is available on the Pro plan.")
-                        if item["fish_model"] not in {"s2-pro", "s2.1-pro-free"}:
+                        if item["fish_model"] not in {settings.FISH_AUDIO_PRO_MODEL, settings.FISH_AUDIO_FREE_MODEL}:
                             raise ValueError("Unsupported Fish Audio model.")
                         async for chunk in stream_tts(
                             item["text"],
