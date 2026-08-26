@@ -5,7 +5,7 @@ from fastapi import APIRouter, Depends, File, HTTPException, UploadFile
 from fastapi.responses import StreamingResponse
 from sqlalchemy.orm import Session
 
-from app.dependencies import get_current_user, get_db, require_pro_subscription
+from app.dependencies import get_current_user, get_db, require_active_subscription, require_pro_subscription
 from app.fish_audio import FishAudioError, create_voice_clone, stream_tts
 from app.models import DBUser, DBUserPreferences
 from app.schemas import FishVoiceCloneResponse, TTSTextPayloadSchema, VoiceDetailSchema
@@ -43,7 +43,7 @@ async def list_voices(current_user: DBUser = Depends(get_current_user)):
 @router.post("/v1/tts")
 async def text_to_speech(
     payload: TTSTextPayloadSchema,
-    current_user: DBUser = Depends(get_current_user),
+    current_user: DBUser = Depends(require_active_subscription),
     db: Session = Depends(get_db),
 ):
     """TTS using the provider and Fish model selected in user preferences."""
