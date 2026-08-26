@@ -7,9 +7,15 @@ from sqlalchemy.orm import Session
 
 from app.config import settings
 from app.dependencies import get_current_user, get_db, require_active_subscription, require_pro_subscription
-from app.fish_audio import FishAudioError, create_voice_clone, stream_tts
+from app.fish_audio import FishAudioError, create_voice_clone, list_voice_models, stream_tts
 from app.models import DBUser, DBUserPreferences
-from app.schemas import FishVoiceCloneResponse, TTSTextPayloadSchema, VoiceDetailSchema
+from app.schemas import (
+    FishVoiceCloneResponse,
+    FishVoiceDetailSchema,
+    TTSTextPayloadSchema,
+    TTSVoiceCatalogSchema,
+    VoiceDetailSchema,
+)
 
 router = APIRouter(tags=["Text-to-Speech"])
 CACHED_VOICES: List[VoiceDetailSchema] = []
@@ -36,9 +42,40 @@ async def tts_streaming_generator(text: str, voice: str, pitch: str = "+0Hz"):
             yield chunk["data"]
 
 
-@router.get("/v1/tts/voices", response_model=List[VoiceDetailSchema])
-async def list_voices(current_user: DBUser = Depends(get_current_user)):
-    return await get_all_edge_voices()
+@router.get("/v1/tts/voices", response_model=TTSVoiceCatalogSchema)
+async def list_voices(
+    current_user: DBUser = Depends(get_current_user),
+):
+    """Return the voice catalog available to this user.
+
+    Edge voices are available to everyone. Fish voices are returned for Pro
+    users and include public library models plus models owned by the Fish API
+    workspace (including EchoStream-created private clones).
+    """
+    edge_voices = await get_all_edge_voices()
+
+    if current_user.plan.lower() != "pro":
+        return TTSVoiceCatalogSchema(edge=edge_voices, fish=[])
+
+    try:
+        fish_models = await list_voice_models()
+    except FishAudioError as exc:
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
+
+    fish_voices = [
+        FishVoiceDetailSchema(
+            id=model["_id"],
+            name=model.get("title") or "Untitled Fish voice",
+            voice_type=("cloned" if model.get("visibility") == "private" else "library"),
+            description=model.get("description") or "",
+            languages=model.get("languages") or [],
+            visibility=model.get("visibility") or "public",
+        )
+        for model in fish_models
+        if model.get("state") in {None, "created", "trained"}
+    ]
+
+    return TTSVoiceCatalogSchema(edge=edge_voices, fish=fish_voices)
 
 
 @router.post("/v1/tts")
