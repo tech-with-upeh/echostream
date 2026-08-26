@@ -22,6 +22,7 @@ class DBUser(Base):
     subscription = relationship("DBSubscription", back_populates="user", uselist=False, cascade="all, delete-orphan")
     preferences = relationship("DBUserPreferences", back_populates="user", uselist=False, cascade="all, delete-orphan")
     fish_voices = relationship("DBFishVoice", back_populates="user", cascade="all, delete-orphan")
+    muted_users = relationship("DBMutedUser", back_populates="owner", cascade="all, delete-orphan")
 
 
 class DBRefreshToken(Base):
@@ -78,6 +79,22 @@ class DBUserPreferences(Base):
     fish_voice_id = Column(String, nullable=True)
     fish_model = Column(String, nullable=False, default="s2-pro")
     pitch = Column(String, nullable=False, default="+0Hz")
+    volume = Column(Integer, nullable=False, default=100)
+    speed = Column(Integer, nullable=False, default=100)
+    emoji_to_words = Column(Boolean, nullable=False, default=False)
+    filter_profanity = Column(Boolean, nullable=False, default=False)
+    require_command_prefix = Column(Boolean, nullable=False, default=False)
+    max_message_length = Column(Integer, nullable=False, default=100)
+    speech_prefix_enabled = Column(Boolean, nullable=False, default=False)
+    speech_prefix_template = Column(String, nullable=False, default="{{user}} said {{comment}}")
+    allowed_user_types = Column(String, nullable=False, default="all")
+    minimum_account_age_days = Column(Integer, nullable=False, default=1)
+    blocked_words = Column(Text, nullable=False, default="[]")
+    spam_protection_enabled = Column(Boolean, nullable=False, default=False)
+    block_repeated_words = Column(Boolean, nullable=False, default=True)
+    auto_mute_repeat_offenders = Column(Boolean, nullable=False, default=False)
+    spam_cooldown_seconds = Column(Integer, nullable=False, default=2)
+    spam_max_requests_per_minute = Column(Integer, nullable=False, default=10)
     user = relationship("DBUser", back_populates="preferences")
 
 
@@ -92,3 +109,15 @@ class DBFishVoice(Base):
     model = Column(String, nullable=False, default="s2-pro")
     created_at = Column(DateTime, nullable=False)
     user = relationship("DBUser", back_populates="fish_voices")
+
+
+class DBMutedUser(Base):
+    __tablename__ = "muted_users"
+
+    id = Column(Integer, primary_key=True, index=True)
+    owner_id = Column(Integer, ForeignKey("users.id", ondelete="CASCADE"), nullable=False, index=True)
+    tiktok_user_id = Column(String, nullable=True, index=True)
+    tiktok_username = Column(String, nullable=False)
+    reason = Column(String, nullable=False, default="manual")
+    created_at = Column(DateTime, nullable=False)
+    owner = relationship("DBUser", back_populates="muted_users")
