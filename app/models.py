@@ -13,7 +13,6 @@ class DBUser(Base):
     hashed_password = Column(String, nullable=False)
     is_active = Column(Boolean, default=True)
     is_verified = Column(Boolean, default=False)
-
     plan = Column(String, nullable=False, default="starter")
     subscription_status = Column(String, nullable=False, default="active")
     trial_ends_at = Column(DateTime, nullable=True)
@@ -31,7 +30,6 @@ class DBRefreshToken(Base):
     token = Column(String, unique=True, index=True, nullable=False)
     user_id = Column(Integer, ForeignKey("users.id", ondelete="CASCADE"), nullable=False)
     expires_at = Column(DateTime, nullable=False)
-
     user = relationship("DBUser", back_populates="refresh_tokens")
 
 
@@ -63,7 +61,6 @@ class DBSubscription(Base):
     metadata_json = Column(Text, nullable=True)
     created_at = Column(DateTime, nullable=False)
     updated_at = Column(DateTime, nullable=False)
-
     user = relationship("DBUser", back_populates="subscription")
 
 
@@ -75,10 +72,9 @@ class DBUserPreferences(Base):
     tiktok_username = Column(String, nullable=True)
     comment_prefix = Column(String, nullable=False, default="")
     comment_suffix = Column(String, nullable=False, default="")
-    # edge or fish. Existing users remain on Edge until they opt into Fish.
     tts_provider = Column(String, nullable=False, default="edge")
     voice = Column(String, nullable=False, default="en-US-GuyNeural")
     fish_voice_id = Column(String, nullable=True)
+    fish_model = Column(String, nullable=False, default="s2-pro")
     pitch = Column(String, nullable=False, default="+0Hz")
-
     user = relationship("DBUser", back_populates="preferences")
