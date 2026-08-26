@@ -10,17 +10,20 @@ class FishAudioError(RuntimeError):
     """Raised when Fish Audio cannot synthesize or create a voice."""
 
 
-def _headers(model: str | None = None) -> dict[str, str]:
+def _headers(model: str) -> dict[str, str]:
     if not settings.FISH_AUDIO_API_KEY:
         raise FishAudioError("Fish Audio is not configured. Set FISH_AUDIO_API_KEY.")
 
-    headers = {
+    if model not in {settings.FISH_AUDIO_PRO_MODEL, settings.FISH_AUDIO_FREE_MODEL}:
+        raise FishAudioError(f"Unsupported Fish Audio model: {model}")
+
+    # Fish uses the same /v1/tts endpoint for S2 Pro and S2.1 Pro Free.
+    # The model is selected explicitly through the `model` request header.
+    return {
         "Authorization": f"Bearer {settings.FISH_AUDIO_API_KEY}",
         "Content-Type": "application/json",
+        "model": model,
     }
-    if model:
-        headers["model"] = model
-    return headers
 
 
 async def stream_tts(
@@ -30,27 +33,47 @@ async def stream_tts(
     speed: float = 1.0,
 ) -> AsyncIterator[bytes]:
     """Stream Fish Audio TTS bytes without exposing the provider key to clients."""
-    body = {
+    selected_model = model or settings.FISH_AUDIO_PRO_MODEL
+
+    # Keep the request body compatible with Fish's documented S2.1 Pro Free
+    # request. Provider-specific optional controls are only sent when needed.
+    body: dict[str, object] = {
         "text": text,
         "format": settings.FISH_AUDIO_DEFAULT_FORMAT,
-        "sample_rate": settings.FISH_AUDIO_DEFAULT_SAMPLE_RATE,
-        "mp3_bitrate": settings.FISH_AUDIO_DEFAULT_BITRATE,
-        "prosody": {"speed": speed, "volume": 0, "normalize_loudness": True},
     }
     if reference_id:
         body["reference_id"] = reference_id
+
+    # Fish accepts prosody controls, but they are unnecessary for the free
+    # model and can make debugging provider-side failures harder. Only send
+    # the control when the caller actually requested a non-default speed.
+    if speed != 1.0:
+        body["prosody"] = {
+            "speed": speed,
+            "volume": 0,
+            "normalize_loudness": True,
+        }
 
     async with httpx.AsyncClient(timeout=httpx.Timeout(60.0, connect=10.0)) as client:
         try:
             async with client.stream(
                 "POST",
                 f"{settings.FISH_AUDIO_BASE_URL}/v1/tts",
-                headers=_headers(model or settings.FISH_AUDIO_PRO_MODEL),
+                headers=_headers(selected_model),
                 json=body,
             ) as response:
                 if response.status_code >= 400:
                     detail = (await response.aread()).decode("utf-8", errors="replace")
-                    raise FishAudioError(f"Fish Audio TTS failed ({response.status_code}): {detail}")
+                    if response.status_code == 402:
+                        detail = (
+                            f"{detail} "
+                            "If using s2.1-pro-free, verify that the API key is a current "
+                            "Fish Audio API key and that the free model is available to "
+                            "your account."
+                        )
+                    raise FishAudioError(
+                        f"Fish Audio TTS failed ({response.status_code}): {detail}"
+                    )
                 async for chunk in response.aiter_bytes():
                     if chunk:
                         yield chunk
