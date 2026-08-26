@@ -17,8 +17,6 @@ def _headers(model: str) -> dict[str, str]:
     if model not in {settings.FISH_AUDIO_PRO_MODEL, settings.FISH_AUDIO_FREE_MODEL}:
         raise FishAudioError(f"Unsupported Fish Audio model: {model}")
 
-    # Fish uses the same /v1/tts endpoint for S2 Pro and S2.1 Pro Free.
-    # The model is selected explicitly through the `model` request header.
     return {
         "Authorization": f"Bearer {settings.FISH_AUDIO_API_KEY}",
         "Content-Type": "application/json",
@@ -35,18 +33,12 @@ async def stream_tts(
     """Stream Fish Audio TTS bytes without exposing the provider key to clients."""
     selected_model = model or settings.FISH_AUDIO_PRO_MODEL
 
-    # Keep the request body compatible with Fish's documented S2.1 Pro Free
-    # request. Provider-specific optional controls are only sent when needed.
     body: dict[str, object] = {
         "text": text,
         "format": settings.FISH_AUDIO_DEFAULT_FORMAT,
     }
     if reference_id:
         body["reference_id"] = reference_id
-
-    # Fish accepts prosody controls, but they are unnecessary for the free
-    # model and can make debugging provider-side failures harder. Only send
-    # the control when the caller actually requested a non-default speed.
     if speed != 1.0:
         body["prosody"] = {
             "speed": speed,
@@ -66,10 +58,9 @@ async def stream_tts(
                     detail = (await response.aread()).decode("utf-8", errors="replace")
                     if response.status_code == 402:
                         detail = (
-                            f"{detail} "
-                            "If using s2.1-pro-free, verify that the API key is a current "
-                            "Fish Audio API key and that the free model is available to "
-                            "your account."
+                            f"{detail} If using s2.1-pro-free, verify that the API key is "
+                            "a current Fish Audio API key and that the free model is "
+                            "available to your account."
                         )
                     raise FishAudioError(
                         f"Fish Audio TTS failed ({response.status_code}): {detail}"
@@ -79,6 +70,45 @@ async def stream_tts(
                         yield chunk
         except httpx.HTTPError as exc:
             raise FishAudioError(f"Fish Audio request failed: {exc}") from exc
+
+
+async def list_voice_models(page_size: int = 50) -> list[dict]:
+    """Return public Fish voice models plus models owned by the API workspace."""
+    if not settings.FISH_AUDIO_API_KEY:
+        raise FishAudioError("Fish Audio is not configured. Set FISH_AUDIO_API_KEY.")
+
+    headers = {"Authorization": f"Bearer {settings.FISH_AUDIO_API_KEY}"}
+    models: list[dict] = []
+
+    async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
+        try:
+            for params in (
+                {"page_size": page_size, "page_number": 1, "self": "false", "sort_by": "score"},
+                {"page_size": page_size, "page_number": 1, "self": "true", "sort_by": "created_at"},
+            ):
+                response = await client.get(
+                    f"{settings.FISH_AUDIO_BASE_URL}/model",
+                    headers=headers,
+                    params=params,
+                )
+                if response.status_code >= 400:
+                    detail = response.text
+                    raise FishAudioError(
+                        f"Fish Audio voice list failed ({response.status_code}): {detail}"
+                    )
+
+                payload = response.json()
+                for model in payload.get("items", []):
+                    model_id = model.get("_id")
+                    if model_id and model.get("type", "tts") in {"tts", "svc"}:
+                        models.append(model)
+        except httpx.HTTPError as exc:
+            raise FishAudioError(f"Fish Audio voice list request failed: {exc}") from exc
+
+    unique: dict[str, dict] = {}
+    for model in models:
+        unique[model["_id"]] = model
+    return list(unique.values())
 
 
 async def create_voice_clone(
