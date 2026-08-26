@@ -21,6 +21,7 @@ class DBUser(Base):
     refresh_tokens = relationship("DBRefreshToken", back_populates="user", cascade="all, delete-orphan")
     subscription = relationship("DBSubscription", back_populates="user", uselist=False, cascade="all, delete-orphan")
     preferences = relationship("DBUserPreferences", back_populates="user", uselist=False, cascade="all, delete-orphan")
+    fish_voices = relationship("DBFishVoice", back_populates="user", cascade="all, delete-orphan")
 
 
 class DBRefreshToken(Base):
@@ -78,3 +79,16 @@ class DBUserPreferences(Base):
     fish_model = Column(String, nullable=False, default="s2-pro")
     pitch = Column(String, nullable=False, default="+0Hz")
     user = relationship("DBUser", back_populates="preferences")
+
+
+class DBFishVoice(Base):
+    __tablename__ = "fish_voices"
+
+    id = Column(Integer, primary_key=True, index=True)
+    user_id = Column(Integer, ForeignKey("users.id", ondelete="CASCADE"), nullable=False, index=True)
+    voice_id = Column(String, unique=True, nullable=False, index=True)
+    title = Column(String, nullable=False)
+    description = Column(Text, nullable=False, default="")
+    model = Column(String, nullable=False, default="s2-pro")
+    created_at = Column(DateTime, nullable=False)
+    user = relationship("DBUser", back_populates="fish_voices")
