@@ -69,8 +69,8 @@ class FishVoiceDetailSchema(BaseModel):
     visibility: str = "public"
 
 class TTSVoiceCatalogSchema(BaseModel):
-    edge: List[VoiceDetailSchema]
-    fish: List[FishVoiceDetailSchema] = Field(default_factory=list)
+    edge: list[VoiceDetailSchema]
+    fish: list[FishVoiceDetailSchema] = Field(default_factory=list)
 
 class PreferencesSchema(BaseModel):
     tiktok_username: str | None = None
