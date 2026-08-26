@@ -56,9 +56,11 @@ async def text_to_speech(
     if provider == "fish":
         if current_user.plan.lower() != "pro":
             raise HTTPException(status_code=403, detail="Fish Audio is available on the Pro plan.")
-        model = payload.fish_model or (prefs.fish_model if prefs else "s2-pro")
-        if model not in {"s2-pro", "s2.1-pro-free"}:
+
+        model = payload.fish_model or (prefs.fish_model if prefs else settings.FISH_AUDIO_PRO_MODEL)
+        if model not in {settings.FISH_AUDIO_PRO_MODEL, settings.FISH_AUDIO_FREE_MODEL}:
             raise HTTPException(status_code=400, detail="Unsupported Fish Audio model.")
+
         voice_id = payload.voice or (prefs.fish_voice_id if prefs else None)
         return StreamingResponse(
             stream_tts(payload.text, reference_id=voice_id, model=model, speed=payload.speed),
