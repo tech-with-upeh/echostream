@@ -19,10 +19,7 @@ def _get_or_create_preferences(current_user: DBUser, db: Session) -> DBUserPrefe
 
 
 @router.get("/v1/preferences", response_model=PreferencesSchema)
-def get_preferences(
-    current_user: DBUser = Depends(get_current_user),
-    db: Session = Depends(get_db),
-):
+def get_preferences(current_user: DBUser = Depends(get_current_user), db: Session = Depends(get_db)):
     return _get_or_create_preferences(current_user, db)
 
 
@@ -36,6 +33,8 @@ def update_preferences(
 
     if payload.tts_provider == "fish" and current_user.plan.lower() != "pro":
         raise HTTPException(status_code=403, detail="Fish Audio is available on the Pro plan.")
+    if payload.fish_model not in {"s2-pro", "s2.1-pro-free"}:
+        raise HTTPException(status_code=400, detail="Unsupported Fish Audio model.")
 
     prefs.tiktok_username = payload.tiktok_username
     prefs.comment_prefix = payload.comment_prefix
@@ -43,6 +42,7 @@ def update_preferences(
     prefs.tts_provider = payload.tts_provider
     prefs.voice = payload.voice
     prefs.fish_voice_id = payload.fish_voice_id
+    prefs.fish_model = payload.fish_model
     prefs.pitch = payload.pitch
     db.commit()
     db.refresh(prefs)
