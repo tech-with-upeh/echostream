@@ -7,7 +7,7 @@ ALTER TABLE user_preferences
     ADD COLUMN IF NOT EXISTS max_message_length INTEGER NOT NULL DEFAULT 100,
     ADD COLUMN IF NOT EXISTS speech_prefix_enabled BOOLEAN NOT NULL DEFAULT FALSE,
     ADD COLUMN IF NOT EXISTS speech_prefix_template VARCHAR NOT NULL DEFAULT '{{user}} said {{comment}}',
-    ADD COLUMN IF NOT EXISTS allowed_user_types VARCHAR NOT NULL DEFAULT '[""all""]',
+    ADD COLUMN IF NOT EXISTS allowed_user_types VARCHAR NOT NULL DEFAULT '["all"]',
     ADD COLUMN IF NOT EXISTS minimum_account_age_days INTEGER NOT NULL DEFAULT 1,
     ADD COLUMN IF NOT EXISTS blocked_words TEXT NOT NULL DEFAULT '[]',
     ADD COLUMN IF NOT EXISTS spam_protection_enabled BOOLEAN NOT NULL DEFAULT FALSE,
