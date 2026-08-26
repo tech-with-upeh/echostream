@@ -1,3 +1,4 @@
+from datetime import datetime, timezone
 from typing import List
 
 import edge_tts
@@ -7,7 +8,7 @@ from sqlalchemy.orm import Session
 
 from app.config import settings
 from app.dependencies import get_current_user, get_db, require_active_subscription, require_pro_subscription
-from app.fish_audio import FishAudioError, create_voice_clone, list_owned_voice_models, list_voice_models, stream_tts
+from app.fish_audio import FishAudioError, create_voice_clone, list_voice_models, stream_tts
 from app.models import DBFishVoice, DBUser, DBUserPreferences
 from app.schemas import (
     FishVoiceCloneResponse,
@@ -53,6 +54,17 @@ def _fish_voice_response(model: dict) -> FishVoiceDetailSchema:
     )
 
 
+def _saved_fish_voice_response(voice: DBFishVoice) -> FishVoiceDetailSchema:
+    return FishVoiceDetailSchema(
+        id=voice.voice_id,
+        name=voice.title,
+        voice_type="cloned",
+        description=voice.description or "",
+        languages=[],
+        visibility="private",
+    )
+
+
 @router.get("/v1/tts/voices", response_model=TTSVoiceCatalogSchema)
 async def list_voices(current_user: DBUser = Depends(get_current_user)):
     """Return the public voice catalog available to the current user."""
@@ -71,19 +83,18 @@ async def list_voices(current_user: DBUser = Depends(get_current_user)):
 
 
 @router.get("/v1/tts/fish/voices", response_model=list[FishVoiceDetailSchema])
-async def list_fish_cloned_voices(current_user: DBUser = Depends(require_pro_subscription)):
-    """Return only Fish Audio voices owned by the EchoStream Fish workspace."""
-    try:
-        fish_models = await list_owned_voice_models()
-    except FishAudioError as exc:
-        raise HTTPException(status_code=502, detail=str(exc)) from exc
-
-    return [
-        _fish_voice_response(model)
-        for model in fish_models
-        if model.get("visibility") == "private"
-        and model.get("state") in {None, "created", "trained"}
-    ]
+def list_fish_cloned_voices(
+    current_user: DBUser = Depends(require_pro_subscription),
+    db: Session = Depends(get_db),
+):
+    """Return only the Fish Audio voice clones created for the current user."""
+    voices = (
+        db.query(DBFishVoice)
+        .filter(DBFishVoice.user_id == current_user.id)
+        .order_by(DBFishVoice.created_at.desc())
+        .all()
+    )
+    return [_saved_fish_voice_response(voice) for voice in voices]
 
 
 @router.post("/v1/tts")
@@ -128,7 +139,7 @@ async def clone_fish_voice(
     current_user: DBUser = Depends(require_pro_subscription),
     db: Session = Depends(get_db),
 ):
-    """Create a private Fish Audio voice clone and save it to user preferences."""
+    """Create a private Fish Audio voice clone, register it to the user, and select it."""
     if not audio.content_type or not audio.content_type.startswith("audio/"):
         raise HTTPException(status_code=400, detail="Please upload an audio reference file.")
     if not title.strip():
@@ -148,6 +159,17 @@ async def clone_fish_voice(
         )
     except FishAudioError as exc:
         raise HTTPException(status_code=502, detail=str(exc)) from exc
+
+    db.add(
+        DBFishVoice(
+            user_id=current_user.id,
+            voice_id=voice_id,
+            title=title.strip(),
+            description="EchoStream Pro voice clone",
+            model=settings.FISH_AUDIO_PRO_MODEL,
+            created_at=datetime.now(timezone.utc).replace(tzinfo=None),
+        )
+    )
 
     prefs.tts_provider = "fish"
     prefs.fish_voice_id = voice_id
