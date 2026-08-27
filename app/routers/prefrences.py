@@ -9,14 +9,6 @@ from app.schemas import PreferencesSchema
 
 router = APIRouter(tags=["Preferences"])
 
-PRO_ONLY_FIELDS = {
-    "emoji_to_words", "filter_profanity", "require_command_prefix",
-    "speech_prefix_enabled", "speech_prefix_template",
-    "minimum_account_age_days", "blocked_words", "spam_protection_enabled",
-    "block_repeated_words", "auto_mute_repeat_offenders",
-    "spam_cooldown_seconds", "spam_max_requests_per_minute",
-}
-
 
 def _parse_list(value: str | None, default: list[str]) -> list[str]:
     if not value or not value.strip():
@@ -29,7 +21,6 @@ def _parse_list(value: str | None, default: list[str]) -> list[str]:
             return [parsed]
     except (json.JSONDecodeError, TypeError):
         pass
-    # Backward compatibility for legacy DB values such as "all" or "mods,followers".
     return [item.strip() for item in value.split(",") if item.strip()] or default
 
 
@@ -46,8 +37,6 @@ def _get_or_create_preferences(current_user: DBUser, db: Session) -> DBUserPrefe
 def _serialize(prefs: DBUserPreferences) -> PreferencesSchema:
     return PreferencesSchema(
         tiktok_username=prefs.tiktok_username,
-        comment_prefix=prefs.comment_prefix,
-        comment_suffix=prefs.comment_suffix,
         tts_provider=prefs.tts_provider,
         voice=prefs.voice,
         fish_voice_id=prefs.fish_voice_id,
@@ -59,8 +48,10 @@ def _serialize(prefs: DBUserPreferences) -> PreferencesSchema:
         filter_profanity=prefs.filter_profanity,
         require_command_prefix=prefs.require_command_prefix,
         max_message_length=prefs.max_message_length,
-        speech_prefix_enabled=prefs.speech_prefix_enabled,
-        speech_prefix_template=prefs.speech_prefix_template,
+        comment_speech_enabled=prefs.comment_speech_enabled,
+        comment_speech_template=prefs.comment_speech_template,
+        event_speech_enabled=prefs.event_speech_enabled,
+        event_speech_template=prefs.event_speech_template,
         allowed_user_types=_parse_list(prefs.allowed_user_types, ["all"]),
         minimum_account_age_days=prefs.minimum_account_age_days,
         blocked_words=_parse_list(prefs.blocked_words, []),
@@ -83,18 +74,25 @@ def update_preferences(payload: PreferencesSchema, current_user: DBUser = Depend
     is_pro = current_user.plan.lower() == "pro"
     if payload.tts_provider == "fish" and not is_pro:
         raise HTTPException(status_code=403, detail="Fish Audio is available on the Pro plan.")
-    if payload.fish_model not in {"s2-pro", "s2.1-pro-free"}:
-        raise HTTPException(status_code=400, detail="Unsupported Fish Audio model.")
     if not is_pro and any([
         payload.emoji_to_words, payload.filter_profanity, payload.require_command_prefix,
-        payload.speech_prefix_enabled, payload.minimum_account_age_days != 1,
-        bool(payload.blocked_words), payload.spam_protection_enabled,
-        not payload.block_repeated_words, payload.auto_mute_repeat_offenders,
-        payload.spam_cooldown_seconds != 2, payload.spam_max_requests_per_minute != 10,
+        payload.comment_speech_enabled, payload.event_speech_enabled,
+        payload.minimum_account_age_days != 1, bool(payload.blocked_words),
+        payload.spam_protection_enabled, not payload.block_repeated_words,
+        payload.auto_mute_repeat_offenders, payload.spam_cooldown_seconds != 2,
+        payload.spam_max_requests_per_minute != 10,
     ]):
         raise HTTPException(status_code=403, detail="These advanced TTS and spam-protection settings are available on the Pro plan.")
 
-    for field in ["tiktok_username", "comment_prefix", "comment_suffix", "tts_provider", "voice", "fish_voice_id", "fish_model", "pitch", "volume", "speed", "emoji_to_words", "filter_profanity", "require_command_prefix", "max_message_length", "speech_prefix_enabled", "speech_prefix_template", "minimum_account_age_days", "spam_protection_enabled", "block_repeated_words", "auto_mute_repeat_offenders", "spam_cooldown_seconds", "spam_max_requests_per_minute"]:
+    fields = [
+        "tiktok_username", "tts_provider", "voice", "fish_voice_id", "fish_model",
+        "pitch", "volume", "speed", "emoji_to_words", "filter_profanity",
+        "require_command_prefix", "max_message_length", "comment_speech_enabled",
+        "comment_speech_template", "event_speech_enabled", "event_speech_template",
+        "minimum_account_age_days", "spam_protection_enabled", "block_repeated_words",
+        "auto_mute_repeat_offenders", "spam_cooldown_seconds", "spam_max_requests_per_minute",
+    ]
+    for field in fields:
         setattr(prefs, field, getattr(payload, field))
     prefs.allowed_user_types = json.dumps(payload.allowed_user_types)
     prefs.blocked_words = json.dumps(payload.blocked_words)
