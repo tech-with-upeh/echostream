@@ -47,10 +47,10 @@ class SocialAuthSchema(BaseModel):
     id_token: str
 
 class TTSTextPayloadSchema(BaseModel):
-    text: str = Field(..., description="The text content you want to convert to speech")
-    voice: str | None = Field(None, description="Edge voice name or Fish voice model ID")
-    provider: str | None = Field(None, description="edge or fish; defaults to the user's preference")
-    fish_model: str | None = Field(None, description="Fish model: s2-pro or s2.1-pro-free")
+    text: str
+    voice: str | None = None
+    provider: str | None = None
+    fish_model: str | None = None
     speed: float = Field(1.0, ge=0.5, le=2.0)
 
 class VoiceDetailSchema(BaseModel):
@@ -74,8 +74,6 @@ class TTSVoiceCatalogSchema(BaseModel):
 
 class PreferencesSchema(BaseModel):
     tiktok_username: str | None = None
-    comment_prefix: str = ""
-    comment_suffix: str = ""
     tts_provider: str = Field("edge", pattern="^(edge|fish)$")
     voice: str = "en-US-GuyNeural"
     fish_voice_id: str | None = None
@@ -87,8 +85,10 @@ class PreferencesSchema(BaseModel):
     filter_profanity: bool = False
     require_command_prefix: bool = False
     max_message_length: int = Field(100, ge=1, le=500)
-    speech_prefix_enabled: bool = False
-    speech_prefix_template: str = "{{user}} said {{comment}}"
+    comment_speech_enabled: bool = False
+    comment_speech_template: str = "{{user}} said {{comment}}"
+    event_speech_enabled: bool = False
+    event_speech_template: str = "{{user}} sent {{gift}}"
     allowed_user_types: list[str] = Field(default_factory=lambda: ["all"])
     minimum_account_age_days: int = Field(1, ge=0, le=3650)
     blocked_words: list[str] = Field(default_factory=list)
