@@ -65,7 +65,7 @@ def _contains_repeated_words(text: str, minimum: int = 3) -> bool:
             if run >= minimum:
                 return True
         else:
-            previous, run = word, 1
+            previous, run = 1, word
     return False
 
 
@@ -195,20 +195,15 @@ async def _enqueue_gift_alert(queue: asyncio.Queue, user_id: int, prefs: DBUserP
         volume = prefs.gift_volume
         speed = prefs.gift_speed
         pitch = prefs.pitch
-
-    item = {"id": msg_id, "event_type": "gift", "alert_type": alert_type, "text": "",
-            "provider": provider, "voice": voice, "fish_voice_id": fish_voice_id, "fish_model": fish_model,
-            "pitch": pitch, "speed": max(0.1, min(4.0, speed / 100.0)), "volume": volume,
-            "system_sound_id": system_sound_id, "custom_audio_url": custom_audio_url,
-            "username": username, "gift_id": gift_id, "gift": gift_name, "count": count}
+    item = {"id": msg_id, "event_type": "gift", "alert_type": alert_type, "text": "", "provider": provider,
+            "voice": voice, "fish_voice_id": fish_voice_id, "fish_model": fish_model, "pitch": pitch,
+            "speed": max(0.1, min(4.0, speed / 100.0)), "volume": volume, "system_sound_id": system_sound_id,
+            "custom_audio_url": custom_audio_url, "username": username, "gift_id": gift_id, "gift": gift_name, "count": count}
     if alert_type == "tts":
         item["text"] = _apply_template(template or "{{user}} sent {{gift}}", username, gift=gift_name, count=count, event_type="gift")
-        if not item["text"].strip():
-            return
-    elif alert_type == "system_sound" and not system_sound_id:
-        return
-    elif alert_type == "custom_audio" and not custom_audio_url:
-        return
+        if not item["text"].strip(): return
+    elif alert_type == "system_sound" and not system_sound_id: return
+    elif alert_type == "custom_audio" and not custom_audio_url: return
     await queue.put(item)
 
 
@@ -231,28 +226,41 @@ async def start_tiktok_session(user_id: int, tiktok_username: str) -> None:
         username = event.user.nickname if event.user else "someone"
         tiktok_user_id = str(getattr(event.user, "user_id", None) or getattr(event.user, "uid", None) or "") or None
         comment = (event.comment or "").strip()
-        if _muted(user_id, tiktok_user_id, username) or not _allowed_user(event, prefs): return
+        if _muted(user_id, tiktok_user_id, username) or not _allowed_user(event, prefs):
+            return
         age_days = _account_age_days(event)
-        if age_days is not None and age_days < max(0, prefs.minimum_account_age_days): return
+        if age_days is not None and age_days < max(0, prefs.minimum_account_age_days):
+            return
         if prefs.require_command_prefix:
-            if not comment.startswith("!"): return
+            if not comment.startswith("!"):
+                return
             comment = comment[1:].lstrip()
-            if not comment: return
-        if len(comment) > max(1, prefs.max_message_length): return
+            if not comment:
+                return
+        if len(comment) > max(1, prefs.max_message_length):
+            return
         blocked_words = _normalise_words(prefs.blocked_words)
-        if (blocked_words and _contains_blocked_word(comment, blocked_words)) or (prefs.filter_profanity and _contains_profanity(comment)): return
+        if (blocked_words and _contains_blocked_word(comment, blocked_words)) or (prefs.filter_profanity and _contains_profanity(comment)):
+            return
         if prefs.spam_protection_enabled and prefs.block_repeated_words and _contains_repeated_words(comment):
-            key = (user_id, username.lower()); _repeat_violations[key] += 1
-            if prefs.auto_mute_repeat_offenders and _repeat_violations[key] >= 3: _auto_mute(user_id, tiktok_user_id, username)
+            key = (user_id, username.lower())
+            _repeat_violations[key] += 1
+            if prefs.auto_mute_repeat_offenders and _repeat_violations[key] >= 3:
+                _auto_mute(user_id, tiktok_user_id, username)
             return
         spammed, should_mute = _spam_blocked(user_id, username, prefs)
         if spammed:
-            if should_mute: _auto_mute(user_id, tiktok_user_id, username)
+            if should_mute:
+                _auto_mute(user_id, tiktok_user_id, username)
+            return
+        speech = _apply_template(prefs.comment_speech_template, username, comment=comment)
+        if not speech.strip():
             return
         await queue.put({"id": str(getattr(event.common, "msg_id", id(event))), "event_type": "comment", "alert_type": "tts",
-                         "text": _apply_template(prefs.comment_speech_template, username, comment=comment), "voice": prefs.voice,
-                         "provider": prefs.tts_provider or "edge", "fish_voice_id": prefs.fish_voice_id, "fish_model": prefs.fish_model,
-                         "pitch": prefs.pitch, "speed": max(0.1, min(4.0, prefs.speed / 100.0)), "volume": prefs.volume})
+                         "text": speech, "source_text": comment, "username": username, "voice": prefs.voice,
+                         "provider": prefs.tts_provider or "edge", "fish_voice_id": prefs.fish_voice_id,
+                         "fish_model": prefs.fish_model, "pitch": prefs.pitch,
+                         "speed": max(0.1, min(4.0, prefs.speed / 100.0)), "volume": prefs.volume})
 
     @client.on(GiftEvent)
     async def on_gift(event: GiftEvent):
@@ -293,7 +301,8 @@ async def start_tiktok_session(user_id: int, tiktok_username: str) -> None:
             print(f"[tiktok_manager] Failed to connect for user {user_id} (@{tiktok_username}): {exc!r}")
             active_tiktok_clients.pop(user_id, None)
             queue = active_sessions.get(user_id)
-            if queue is not None: await queue.put({"id": "tiktok-connect-error", "event_type": "error", "text": "", "voice": "en-US-GuyNeural"})
+            if queue is not None:
+                await queue.put({"id": "tiktok-connect-error", "event_type": "error", "text": "", "voice": "en-US-GuyNeural"})
 
     active_tiktok_clients[user_id] = client
     asyncio.create_task(_run())
