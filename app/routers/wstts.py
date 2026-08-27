@@ -54,9 +54,6 @@ async def live_tts_socket(websocket: WebSocket, token: str = Query(...)):
             return
 
         await websocket.accept()
-
-        # /v1/live/start owns TikTok lifecycle. The websocket only consumes
-        # the user's queue and never starts/stops the TikTok client.
         queue = active_sessions.get(user.id)
         tiktok_active = queue is not None
         if queue is None:
@@ -66,17 +63,11 @@ async def live_tts_socket(websocket: WebSocket, token: str = Query(...)):
         prefs = db.query(DBUserPreferences).filter(DBUserPreferences.user_id == user.id).first()
         username = prefs.tiktok_username if prefs else None
 
-        await websocket.send_json({
-            "type": "ready",
-            "message": "WebSocket connected",
-            "tiktok_active": tiktok_active,
-            "tiktok_username": username,
-        })
-        await websocket.send_json({
-            "type": "tiktok_status",
-            "status": "active" if tiktok_active else "not_started",
-            "username": username,
-        })
+        await websocket.send_json({"type": "ready", "message": "WebSocket connected",
+                                   "tiktok_active": tiktok_active, "tiktok_username": username})
+        await websocket.send_json({"type": "tiktok_status",
+                                   "status": "active" if tiktok_active else "not_started",
+                                   "username": username})
 
         async def reader():
             try:
@@ -115,27 +106,20 @@ async def live_tts_socket(websocket: WebSocket, token: str = Query(...)):
                     if msg.get("type") != "speak":
                         await websocket.send_json({"type": "error", "detail": "Unknown message type."})
                         continue
-
                     text = (msg.get("text") or "").strip()
                     if not text:
                         await websocket.send_json({"type": "error", "id": msg.get("id"), "detail": "Text cannot be empty."})
                         continue
                     current_prefs = db.query(DBUserPreferences).filter(DBUserPreferences.user_id == user.id).first()
-                    provider = (msg.get("provider") or (current_prefs.tts_provider if current_prefs else "edge")).lower()
-                    voice = msg.get("voice") or (current_prefs.voice if current_prefs else "en-US-GuyNeural")
-                    await queue.put({
-                        "id": msg.get("id"),
-                        "event_type": msg.get("event_type", "comment"),
-                        "alert_type": "tts",
-                        "text": text,
-                        "provider": provider,
-                        "voice": voice,
-                        "fish_voice_id": current_prefs.fish_voice_id if current_prefs else None,
-                        "fish_model": msg.get("fish_model") or (current_prefs.fish_model if current_prefs else settings.FISH_AUDIO_PRO_MODEL),
-                        "pitch": current_prefs.pitch if current_prefs else "+0Hz",
-                        "speed": float(msg.get("speed", 1.0)),
-                        "volume": current_prefs.volume if current_prefs else 100,
-                    })
+                    await queue.put({"id": msg.get("id"), "event_type": msg.get("event_type", "comment"),
+                                     "alert_type": "tts", "text": text,
+                                     "provider": (msg.get("provider") or (current_prefs.tts_provider if current_prefs else "edge")).lower(),
+                                     "voice": msg.get("voice") or (current_prefs.voice if current_prefs else "en-US-GuyNeural"),
+                                     "fish_voice_id": current_prefs.fish_voice_id if current_prefs else None,
+                                     "fish_model": msg.get("fish_model") or (current_prefs.fish_model if current_prefs else settings.FISH_AUDIO_PRO_MODEL),
+                                     "pitch": current_prefs.pitch if current_prefs else "+0Hz",
+                                     "speed": float(msg.get("speed", 1.0)),
+                                     "volume": current_prefs.volume if current_prefs else 100})
             except WebSocketDisconnect:
                 return
 
@@ -173,7 +157,6 @@ async def live_tts_socket(websocket: WebSocket, token: str = Query(...)):
         for task in pending:
             task.cancel()
     finally:
-        # Disconnecting the websocket must not stop the TikTok listener.
         if user is not None and queue is not None and active_sessions.get(user.id) is queue:
             active_sessions.pop(user.id, None)
         db.close()
