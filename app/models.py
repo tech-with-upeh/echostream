@@ -2,10 +2,8 @@ from sqlalchemy import Column, Integer, String, Boolean, ForeignKey, DateTime, T
 from sqlalchemy.orm import relationship
 from app.database import Base
 
-
 class DBUser(Base):
     __tablename__ = "users"
-
     id = Column(Integer, primary_key=True, index=True)
     first_name = Column(String, nullable=False)
     last_name = Column(String, nullable=False)
@@ -17,36 +15,29 @@ class DBUser(Base):
     subscription_status = Column(String, nullable=False, default="active")
     trial_ends_at = Column(DateTime, nullable=True)
     subscription_ends_at = Column(DateTime, nullable=True)
-
     refresh_tokens = relationship("DBRefreshToken", back_populates="user", cascade="all, delete-orphan")
     subscription = relationship("DBSubscription", back_populates="user", uselist=False, cascade="all, delete-orphan")
     preferences = relationship("DBUserPreferences", back_populates="user", uselist=False, cascade="all, delete-orphan")
     fish_voices = relationship("DBFishVoice", back_populates="user", cascade="all, delete-orphan")
     muted_users = relationship("DBMutedUser", back_populates="owner", cascade="all, delete-orphan")
 
-
 class DBRefreshToken(Base):
     __tablename__ = "refresh_tokens"
-
     id = Column(Integer, primary_key=True, index=True)
     token = Column(String, unique=True, index=True, nullable=False)
     user_id = Column(Integer, ForeignKey("users.id", ondelete="CASCADE"), nullable=False)
     expires_at = Column(DateTime, nullable=False)
     user = relationship("DBUser", back_populates="refresh_tokens")
 
-
 class DBEmailVerificationCode(Base):
     __tablename__ = "email_verification_codes"
-
     id = Column(Integer, primary_key=True, index=True)
     email = Column(String, index=True, nullable=False)
     code = Column(String, nullable=False)
     expires_at = Column(DateTime, nullable=False)
 
-
 class DBSubscription(Base):
     __tablename__ = "subscriptions"
-
     id = Column(Integer, primary_key=True, index=True)
     user_id = Column(Integer, ForeignKey("users.id", ondelete="CASCADE"), unique=True, nullable=False)
     plan = Column(String, nullable=False)
@@ -65,15 +56,11 @@ class DBSubscription(Base):
     updated_at = Column(DateTime, nullable=False)
     user = relationship("DBUser", back_populates="subscription")
 
-
 class DBUserPreferences(Base):
     __tablename__ = "user_preferences"
-
     id = Column(Integer, primary_key=True, index=True)
     user_id = Column(Integer, ForeignKey("users.id", ondelete="CASCADE"), unique=True, nullable=False)
     tiktok_username = Column(String, nullable=True)
-    comment_prefix = Column(String, nullable=False, default="")
-    comment_suffix = Column(String, nullable=False, default="")
     tts_provider = Column(String, nullable=False, default="edge")
     voice = Column(String, nullable=False, default="en-US-GuyNeural")
     fish_voice_id = Column(String, nullable=True)
@@ -85,9 +72,11 @@ class DBUserPreferences(Base):
     filter_profanity = Column(Boolean, nullable=False, default=False)
     require_command_prefix = Column(Boolean, nullable=False, default=False)
     max_message_length = Column(Integer, nullable=False, default=100)
-    speech_prefix_enabled = Column(Boolean, nullable=False, default=False)
-    speech_prefix_template = Column(String, nullable=False, default="{{user}} said {{comment}}")
-    allowed_user_types = Column(String, nullable=False, default="all")
+    comment_speech_enabled = Column(Boolean, nullable=False, default=False)
+    comment_speech_template = Column(String, nullable=False, default="{{user}} said {{comment}}")
+    event_speech_enabled = Column(Boolean, nullable=False, default=False)
+    event_speech_template = Column(String, nullable=False, default="{{user}} sent {{gift}}")
+    allowed_user_types = Column(String, nullable=False, default='["all"]')
     minimum_account_age_days = Column(Integer, nullable=False, default=1)
     blocked_words = Column(Text, nullable=False, default="[]")
     spam_protection_enabled = Column(Boolean, nullable=False, default=False)
@@ -97,10 +86,8 @@ class DBUserPreferences(Base):
     spam_max_requests_per_minute = Column(Integer, nullable=False, default=10)
     user = relationship("DBUser", back_populates="preferences")
 
-
 class DBFishVoice(Base):
     __tablename__ = "fish_voices"
-
     id = Column(Integer, primary_key=True, index=True)
     user_id = Column(Integer, ForeignKey("users.id", ondelete="CASCADE"), nullable=False, index=True)
     voice_id = Column(String, unique=True, nullable=False, index=True)
@@ -110,10 +97,8 @@ class DBFishVoice(Base):
     created_at = Column(DateTime, nullable=False)
     user = relationship("DBUser", back_populates="fish_voices")
 
-
 class DBMutedUser(Base):
     __tablename__ = "muted_users"
-
     id = Column(Integer, primary_key=True, index=True)
     owner_id = Column(Integer, ForeignKey("users.id", ondelete="CASCADE"), nullable=False, index=True)
     tiktok_user_id = Column(String, nullable=True, index=True)
