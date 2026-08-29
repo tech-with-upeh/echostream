@@ -60,11 +60,10 @@ def update_preferences(payload: PreferencesSchema, current_user: DBUser = Depend
     if payload.tts_provider == "fish" and not is_pro:
         raise HTTPException(status_code=403, detail="Fish Audio is available on the Pro plan.")
     if not is_pro and any([payload.emoji_to_words, payload.filter_profanity, payload.require_command_prefix,
-                           payload.comment_speech_enabled, payload.event_speech_enabled,
                            payload.minimum_account_age_days != 1, bool(payload.blocked_words),
                            payload.spam_protection_enabled, not payload.block_repeated_words,
                            payload.auto_mute_repeat_offenders, payload.spam_cooldown_seconds != 2,
-                           payload.spam_max_requests_per_minute != 10, payload.gift_alert_enabled]):
+                           payload.spam_max_requests_per_minute != 10]):
         raise HTTPException(status_code=403, detail="These advanced TTS and spam-protection settings are available on the Pro plan.")
     if payload.gift_alert_type == "tts" and payload.gift_tts_provider == "fish" and not is_pro:
         raise HTTPException(status_code=403, detail="Fish Audio gift alerts are available on the Pro plan.")

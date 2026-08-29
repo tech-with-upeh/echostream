@@ -28,8 +28,8 @@ def create_refresh_token(user_id: int) -> tuple[str, datetime]:
     return token_string, expires_at
 
 # Added: Generates a verification token valid for 2 hours
-def create_verification_token(email: str) -> str:
-    expire = datetime.now(timezone.utc) + timedelta(hours=2)
+def create_verification_token(email: str, ttl_in_hours: int = 2) -> str:
+    expire = datetime.now(timezone.utc) + timedelta(hours=ttl_in_hours)
     to_encode = {"sub": email, "type": "verification", "exp": expire}
     return jwt.encode(to_encode, settings.JWT_SECRET_KEY, algorithm=settings.ALGORITHM)
 

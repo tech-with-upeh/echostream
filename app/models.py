@@ -37,6 +37,14 @@ class DBEmailVerificationCode(Base):
     code = Column(String, nullable=False)
     expires_at = Column(DateTime, nullable=False)
 
+class DBResetPassVerificationCode(Base):
+    __tablename__ = "pass_reset_verification_codes"
+    id = Column(Integer, primary_key=True, index=True)
+    email = Column(String, index=True, nullable=False)
+    code = Column(String, nullable=False)
+    token = Column(String, nullable=True)
+    expires_at = Column(DateTime, nullable=False)
+
 class DBSubscription(Base):
     __tablename__ = "subscriptions"
     id = Column(Integer, primary_key=True, index=True)

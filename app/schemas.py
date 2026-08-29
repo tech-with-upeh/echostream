@@ -12,6 +12,14 @@ class UserLoginSchema(BaseModel):
     email: EmailStr
     password: str
 
+class UserForgotPasswordSchema(BaseModel):
+    email: EmailStr
+
+class UserResetPasswordSchema(BaseModel):
+    token: str
+    email: EmailStr
+    password: str
+
 class UserResponse(BaseModel):
     id: int
     first_name: str
