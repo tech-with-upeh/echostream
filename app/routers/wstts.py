@@ -56,9 +56,6 @@ async def live_tts_socket(websocket: WebSocket, token: str = Query(...)):
         await websocket.accept()
         queue = active_sessions.get(user.id)
         tiktok_active = queue is not None
-        if queue is None:
-            queue = asyncio.Queue()
-            active_sessions[user.id] = queue
 
         prefs = db.query(DBUserPreferences).filter(DBUserPreferences.user_id == user.id).first()
         username = prefs.tiktok_username if prefs else None
@@ -68,6 +65,11 @@ async def live_tts_socket(websocket: WebSocket, token: str = Query(...)):
         await websocket.send_json({"type": "tiktok_status",
                                    "status": "active" if tiktok_active else "not_started",
                                    "username": username})
+
+        if queue is None:
+            await websocket.send_json({"type": "error", "detail": "Start the TikTok live session before connecting the TTS stream."})
+            await websocket.close(code=4409)
+            return
 
         async def reader():
             try:
