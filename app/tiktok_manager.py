@@ -22,6 +22,7 @@ _last_request_at: dict[tuple[int, str], float] = {}
 _repeat_violations: dict[tuple[int, str], int] = defaultdict(int)
 _warmup_tasks: dict[int, asyncio.Task] = {}
 _intentional_stops: set[int] = set()
+_join_boundaries: dict[int, float] = {}
 _PROFANITY = {"fuck", "fucking", "shit", "bitch", "asshole", "motherfucker"}
 _INITIAL_SYNC_SECONDS = 2.0
 
@@ -135,6 +136,30 @@ def _gift_override(user_id: int, gift_id: str):
         db.close()
 
 
+def _event_time(event) -> float | None:
+    common = getattr(event, "common", None)
+    raw = getattr(common, "create_time", None)
+    if raw is None:
+        raw = getattr(common, "create_time_ms", None)
+    if raw is None:
+        return None
+    try:
+        value = float(raw)
+    except (TypeError, ValueError):
+        return None
+    if value > 100_000_000_000:
+        value /= 1000.0
+    return value
+
+
+def _is_after_join_boundary(user_id: int, event) -> bool:
+    boundary = _join_boundaries.get(user_id)
+    if boundary is None:
+        return False
+    event_time = _event_time(event)
+    return event_time is None or event_time >= boundary
+
+
 async def _enqueue_event_tts(queue, prefs, msg_id, event_type, username, gift="", count=1):
     if not prefs.event_speech_enabled:
         return
@@ -189,11 +214,13 @@ async def start_tiktok_session(user_id: int, tiktok_username: str) -> None:
         mark_live_failed(user_id, active_sessions, "user not found")
         return
     _intentional_stops.discard(user_id)
+    _join_boundaries.pop(user_id, None)
     client = TikTokLiveClient(unique_id=tiktok_username)
-    client.logger.setLevel(logging.WARNING)
+    client.logger.setLevel(logging.ERROR)
 
     @client.on(ConnectEvent)
     async def on_connect(event: ConnectEvent):
+        _join_boundaries[user_id] = time.time()
         async def _finish_initial_sync():
             try:
                 await asyncio.sleep(_INITIAL_SYNC_SECONDS)
@@ -205,12 +232,12 @@ async def start_tiktok_session(user_id: int, tiktok_username: str) -> None:
         if old:
             old.cancel()
         _warmup_tasks[user_id] = asyncio.create_task(_finish_initial_sync())
-        print(f"[live] connected user_id={user_id}; syncing recent stream events")
+        print(f"[live] connected user_id={user_id}; filtering pre-join events for {_INITIAL_SYNC_SECONDS:.0f}s")
 
     @client.on(CommentEvent)
     async def on_comment(event: CommentEvent):
         queue = active_sessions.get(user_id)
-        if queue is None or not getattr(queue, "ready", False):
+        if queue is None or not getattr(queue, "ready", False) or not _is_after_join_boundary(user_id, event):
             return
         _, prefs = _load_user_and_preferences(user_id)
         if prefs is None or not prefs.comment_speech_enabled:
@@ -246,7 +273,7 @@ async def start_tiktok_session(user_id: int, tiktok_username: str) -> None:
     @client.on(GiftEvent)
     async def on_gift(event: GiftEvent):
         queue = active_sessions.get(user_id)
-        if queue is None or not getattr(queue, "ready", False) or getattr(event, "gift", None) is None or bool(getattr(event, "streaking", False)):
+        if queue is None or not getattr(queue, "ready", False) or not _is_after_join_boundary(user_id, event) or getattr(event, "gift", None) is None or bool(getattr(event, "streaking", False)):
             return
         _, prefs = _load_user_and_preferences(user_id)
         if prefs is None: return
@@ -256,14 +283,14 @@ async def start_tiktok_session(user_id: int, tiktok_username: str) -> None:
     @client.on(FollowEvent)
     async def on_follow(event: FollowEvent):
         queue = active_sessions.get(user_id)
-        if queue is None or not getattr(queue, "ready", False): return
+        if queue is None or not getattr(queue, "ready", False) or not _is_after_join_boundary(user_id, event): return
         _, prefs = _load_user_and_preferences(user_id)
         if prefs: await _enqueue_event_tts(queue, prefs, str(getattr(getattr(event, "common", None), "msg_id", id(event))), "follow", getattr(event.user, "nickname", None) or "someone")
 
     @client.on(LikeEvent)
     async def on_like(event: LikeEvent):
         queue = active_sessions.get(user_id)
-        if queue is None or not getattr(queue, "ready", False): return
+        if queue is None or not getattr(queue, "ready", False) or not _is_after_join_boundary(user_id, event): return
         _, prefs = _load_user_and_preferences(user_id)
         if prefs: await _enqueue_event_tts(queue, prefs, str(getattr(getattr(event, "common", None), "msg_id", id(event))), "like", getattr(event.user, "nickname", None) or "someone", count=int(getattr(event, "count", 1) or 1))
 
@@ -272,6 +299,7 @@ async def start_tiktok_session(user_id: int, tiktok_username: str) -> None:
         task = _warmup_tasks.pop(user_id, None)
         if task: task.cancel()
         active_tiktok_clients.pop(user_id, None)
+        _join_boundaries.pop(user_id, None)
         if user_id in _intentional_stops:
             _intentional_stops.discard(user_id)
             return
@@ -283,6 +311,7 @@ async def start_tiktok_session(user_id: int, tiktok_username: str) -> None:
             await client.start(fetch_gift_info=True)
         except Exception as exc:
             active_tiktok_clients.pop(user_id, None)
+            _join_boundaries.pop(user_id, None)
             mark_live_failed(user_id, active_sessions, str(exc))
 
     active_tiktok_clients[user_id] = client
@@ -293,6 +322,7 @@ async def stop_tiktok_session(user_id: int) -> None:
     _intentional_stops.add(user_id)
     task = _warmup_tasks.pop(user_id, None)
     if task: task.cancel()
+    _join_boundaries.pop(user_id, None)
     client = active_tiktok_clients.pop(user_id, None)
     if client is not None:
         await client.disconnect()
