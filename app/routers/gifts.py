@@ -1,4 +1,3 @@
-import os
 import uuid
 from pathlib import Path
 
@@ -23,25 +22,64 @@ def _gift_to_schema(item: DBGiftPreference) -> GiftPreferenceResponse:
     )
 
 
+def _get_field(value, *names):
+    if isinstance(value, dict):
+        for name in names:
+            if value.get(name) is not None:
+                return value[name]
+    for name in names:
+        result = getattr(value, name, None)
+        if result is not None:
+            return result
+    return None
+
+
 def _serialize_gifts(raw) -> list[TikTokGiftSchema]:
     if not raw:
         return []
     values = raw.values() if isinstance(raw, dict) else raw
     result = []
     for gift in values:
-        gift_id = getattr(gift, "id", None) or getattr(gift, "gift_id", None)
-        name = getattr(gift, "name", None) or getattr(gift, "gift_name", None)
+        gift_id = _get_field(gift, "id", "gift_id")
+        name = _get_field(gift, "name", "gift_name")
         if gift_id is None or name is None:
             continue
-        image = getattr(gift, "image", None)
-        image_url = getattr(image, "url", None) if image is not None else None
+        image = _get_field(gift, "image")
+        image_url = _get_field(image, "url") if image is not None else _get_field(gift, "image_url")
         result.append(TikTokGiftSchema(
             id=str(gift_id), name=str(name),
-            diamond_count=getattr(gift, "diamond_count", None),
-            type=getattr(gift, "type", None), image_url=image_url,
+            diamond_count=_get_field(gift, "diamond_count", "diamondCount"),
+            type=_get_field(gift, "type"), image_url=image_url,
         ))
     result.sort(key=lambda item: item.name.lower())
     return result
+
+
+def _find_live_gift(user_id: int, gift_id: str):
+    client = active_tiktok_clients.get(user_id)
+    if client is None:
+        return None
+    gifts = _serialize_gifts(getattr(client, "gift_info", None))
+    return next((gift for gift in gifts if gift.id == gift_id), None)
+
+
+def _validate_alert_payload(payload: GiftAlertPreferenceSchema, user_id: int) -> None:
+    if not payload.enabled:
+        return
+    if payload.alert_type == "tts":
+        if not (payload.tts_template or "").strip():
+            raise HTTPException(status_code=422, detail="TTS gift alerts require a tts_template.")
+        if payload.tts_provider == "fish" and not payload.fish_voice_id:
+            raise HTTPException(status_code=422, detail="Fish gift alerts require fish_voice_id.")
+    elif payload.alert_type == "system_sound":
+        if not payload.system_sound_id:
+            raise HTTPException(status_code=422, detail="System sound gift alerts require system_sound_id.")
+    elif payload.alert_type == "custom_audio":
+        if not payload.custom_audio_url:
+            raise HTTPException(status_code=422, detail="Custom audio gift alerts require custom_audio_url.")
+        prefix = f"/uploads/gift-alerts/{user_id}-"
+        if not payload.custom_audio_url.startswith(prefix):
+            raise HTTPException(status_code=403, detail="Custom audio must belong to the current user.")
 
 
 @router.get("/v1/tiktok/gifts", response_model=list[TikTokGiftSchema])
@@ -65,15 +103,27 @@ def list_gift_preferences(current_user: DBUser = Depends(get_current_user), db: 
 def upsert_gift_preference(gift_id: str, payload: GiftAlertPreferenceSchema, current_user: DBUser = Depends(get_current_user), db: Session = Depends(get_db)):
     if current_user.plan.lower() != "pro":
         raise HTTPException(status_code=403, detail="Gift-specific alert settings are available on the Pro plan.")
-    if payload.alert_type == "tts" and payload.tts_provider == "fish" and current_user.plan.lower() != "pro":
-        raise HTTPException(status_code=403, detail="Fish Audio gift alerts are available on the Pro plan.")
-    item = db.query(DBGiftPreference).filter(DBGiftPreference.owner_id == current_user.id, DBGiftPreference.gift_id == gift_id).first()
+    _validate_alert_payload(payload, current_user.id)
+
+    item = db.query(DBGiftPreference).filter(
+        DBGiftPreference.owner_id == current_user.id,
+        DBGiftPreference.gift_id == gift_id,
+    ).first()
+
+    live_gift = _find_live_gift(current_user.id, gift_id)
+    gift_name = live_gift.name if live_gift is not None else gift_id
+
     if item is None:
-        item = DBGiftPreference(owner_id=current_user.id, gift_id=gift_id, gift_name=gift_id)
+        item = DBGiftPreference(owner_id=current_user.id, gift_id=gift_id, gift_name=gift_name)
         db.add(item)
+    elif live_gift is not None:
+        item.gift_name = gift_name
+
     for field, value in payload.model_dump().items():
         setattr(item, field, value)
-    db.commit(); db.refresh(item)
+
+    db.commit()
+    db.refresh(item)
     return _gift_to_schema(item)
 
 
@@ -81,10 +131,14 @@ def upsert_gift_preference(gift_id: str, payload: GiftAlertPreferenceSchema, cur
 def delete_gift_preference(gift_id: str, current_user: DBUser = Depends(get_current_user), db: Session = Depends(get_db)):
     if current_user.plan.lower() != "pro":
         raise HTTPException(status_code=403, detail="Gift-specific alert settings are available on the Pro plan.")
-    item = db.query(DBGiftPreference).filter(DBGiftPreference.owner_id == current_user.id, DBGiftPreference.gift_id == gift_id).first()
+    item = db.query(DBGiftPreference).filter(
+        DBGiftPreference.owner_id == current_user.id,
+        DBGiftPreference.gift_id == gift_id,
+    ).first()
     if item is None:
         raise HTTPException(status_code=404, detail="Gift preference not found.")
-    db.delete(item); db.commit()
+    db.delete(item)
+    db.commit()
     return {"message": "Gift-specific preference removed."}
 
 
@@ -95,17 +149,24 @@ async def upload_gift_custom_audio(file: UploadFile = File(...), current_user: D
     allowed = {"audio/mpeg", "audio/mp3", "audio/wav", "audio/x-wav", "audio/ogg", "audio/webm"}
     if file.content_type not in allowed:
         raise HTTPException(status_code=400, detail="Unsupported audio format. Use MP3, WAV, OGG, or WebM audio.")
+
     upload_dir = Path("uploads/gift-alerts")
     upload_dir.mkdir(parents=True, exist_ok=True)
     suffix = Path(file.filename or "audio").suffix.lower() or ".audio"
     filename = f"{current_user.id}-{uuid.uuid4().hex}{suffix}"
     path = upload_dir / filename
     size = 0
-    with path.open("wb") as output:
-        while chunk := await file.read(1024 * 1024):
-            size += len(chunk)
-            if size > 10 * 1024 * 1024:
-                path.unlink(missing_ok=True)
-                raise HTTPException(status_code=413, detail="Audio file must be 10 MB or smaller.")
-            output.write(chunk)
+    try:
+        with path.open("wb") as output:
+            while chunk := await file.read(1024 * 1024):
+                size += len(chunk)
+                if size > 10 * 1024 * 1024:
+                    raise HTTPException(status_code=413, detail="Audio file must be 10 MB or smaller.")
+                output.write(chunk)
+    except Exception:
+        path.unlink(missing_ok=True)
+        raise
+    finally:
+        await file.close()
+
     return {"url": f"/uploads/gift-alerts/{filename}", "filename": filename, "size": size}
