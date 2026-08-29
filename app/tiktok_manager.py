@@ -165,6 +165,7 @@ async def _enqueue_event_tts(queue, prefs, msg_id, event_type, username, gift=""
         return
     text = _apply_template(prefs.event_speech_template, username, gift=gift, count=count, event_type=event_type)
     if text.strip():
+        print(f"[tts][{event_type}] {text}")
         await queue.put({"id": msg_id, "event_type": event_type, "alert_type": "tts", "text": text, "voice": prefs.voice, "provider": prefs.tts_provider or "edge", "fish_voice_id": prefs.fish_voice_id, "fish_model": prefs.fish_model, "pitch": prefs.pitch, "speed": max(0.1, min(4.0, prefs.speed / 100.0)), "volume": prefs.volume, "username": username, "gift": gift, "count": count})
 
 
@@ -199,6 +200,7 @@ async def _enqueue_gift_alert(queue, user_id, prefs, msg_id, username, gift_id, 
         item["text"] = _apply_template(template or "{{user}} sent {{gift}}", username, gift=gift_name, count=count, event_type="gift")
         if not item["text"].strip():
             return
+        print(f"[tts][gift] {item['text']}")
     elif alert_type == "system_sound" and not system_sound_id:
         return
     elif alert_type == "custom_audio" and not custom_audio_url:
@@ -267,6 +269,7 @@ async def start_tiktok_session(user_id: int, tiktok_username: str) -> None:
             return
         speech = _apply_template(prefs.comment_speech_template or "{{user}} said {{comment}}", username, comment=comment)
         if speech.strip():
+            print(f"[tts][comment] {speech}")
             msg_id = str(getattr(getattr(event, "common", None), "msg_id", None) or id(event))
             await queue.put({"id": msg_id, "event_type": "comment", "alert_type": "tts", "text": speech, "source_text": comment, "username": username, "voice": prefs.voice, "provider": prefs.tts_provider or "edge", "fish_voice_id": prefs.fish_voice_id, "fish_model": prefs.fish_model, "pitch": prefs.pitch, "speed": max(0.1, min(4.0, prefs.speed / 100.0)), "volume": prefs.volume})
 
