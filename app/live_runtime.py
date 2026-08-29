@@ -43,12 +43,20 @@ class LiveEventQueue(asyncio.Queue):
             self._seen_ids.add(event_id)
             self._seen_order.append(event_id)
             if len(self._seen_order) == self._seen_order.maxlen:
-                # Keep the set bounded to the same retention window.
                 self._seen_ids = set(self._seen_order)
+
+        # Collapse bursts of likes from the same viewer into one pending event.
+        if isinstance(item, dict) and item.get("event_type") == "like":
+            username = item.get("username")
+            for pending in self._queue:
+                if (isinstance(pending, dict)
+                        and pending.get("event_type") == "like"
+                        and pending.get("username") == username):
+                    pending["count"] = int(pending.get("count", 1) or 1) + int(item.get("count", 1) or 1)
+                    return
 
         if self.full():
             event_type = item.get("event_type") if isinstance(item, dict) else None
-            # Likes are the lowest-value event and can be discarded first.
             if event_type == "like":
                 print("[live-queue] DROP like: queue full")
                 return
@@ -56,7 +64,6 @@ class LiveEventQueue(asyncio.Queue):
                 oldest = self.get_nowait()
                 self.task_done()
                 if isinstance(oldest, dict) and oldest.get("event_type") in {"comment", "gift", "follow"}:
-                    # Put important events back if the queue was full of them.
                     try:
                         self.put_nowait(oldest)
                     except asyncio.QueueFull:
@@ -95,7 +102,8 @@ def start_session_monitor(user_id: int, queue: LiveEventQueue, clients: dict, us
 
     async def monitor():
         try:
-            for _ in range(100):
+            deadline = monotonic() + 10.0
+            while monotonic() < deadline:
                 client = clients.get(user_id)
                 if client is None:
                     set_live_state(user_id, "failed")
@@ -103,9 +111,20 @@ def start_session_monitor(user_id: int, queue: LiveEventQueue, clients: dict, us
                 if getattr(client, "connected", False):
                     queue.mark_ready()
                     set_live_state(user_id, "ready")
-                    return
+                    break
                 await asyncio.sleep(0.1)
-            set_live_state(user_id, "failed")
+            else:
+                set_live_state(user_id, "failed")
+                return
+
+            while True:
+                await asyncio.sleep(1.0)
+                if user_id not in clients:
+                    set_live_state(user_id, "failed")
+                    return
+                if not getattr(clients[user_id], "connected", False):
+                    set_live_state(user_id, "failed")
+                    return
         except asyncio.CancelledError:
             raise
 
