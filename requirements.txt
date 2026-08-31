@@ -9,3 +9,5 @@ google-auth
 edge-tts
 httpx
 alembic
+boto3
+python-magic
