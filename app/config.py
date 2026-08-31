@@ -42,10 +42,16 @@ class Settings(BaseSettings):
     PAYSTACK_PLAN_SYNC_SECRET: str = ""
     PAYSTACK_CALLBACK_URL: str
 
+    # Cloudflare R2 storage. Keep all credentials server-side.
+    R2_ACCOUNT_ID: str
+    R2_ACCESS_KEY_ID: str
+    R2_SECRET_ACCESS_KEY: str
+    R2_BUCKET_NAME: str
+    R2_PUBLIC_BASE_URL: str
+
     # Fish Audio is a server-side integration. Never expose this key to the client.
     FISH_AUDIO_API_KEY: str = ""
     FISH_AUDIO_BASE_URL: str = "https://api.fish.audio"
-    # Override these in .env when testing a specific Fish model.
     FISH_AUDIO_PRO_MODEL: str = "s2-pro"
     FISH_AUDIO_FREE_MODEL: str = "s2.1-pro-free"
     FISH_AUDIO_DEFAULT_FORMAT: str = "mp3"
