@@ -2,7 +2,8 @@ import uuid
 from pathlib import Path
 
 from fastapi import APIRouter, Depends, File, HTTPException, UploadFile
-from sqlalchemy.orm import Session
+from sqlalchemy import select
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.dependencies import get_current_user, get_db
 from app.models import DBGiftPreference, DBUser
@@ -46,11 +47,7 @@ def _serialize_gifts(raw) -> list[TikTokGiftSchema]:
             continue
         image = _get_field(gift, "image")
         image_url = _get_field(image, "url") if image is not None else _get_field(gift, "image_url")
-        result.append(TikTokGiftSchema(
-            id=str(gift_id), name=str(name),
-            diamond_count=_get_field(gift, "diamond_count", "diamondCount"),
-            type=_get_field(gift, "type"), image_url=image_url,
-        ))
+        result.append(TikTokGiftSchema(id=str(gift_id), name=str(name), diamond_count=_get_field(gift, "diamond_count", "diamondCount"), type=_get_field(gift, "type"), image_url=image_url))
     result.sort(key=lambda item: item.name.lower())
     return result
 
@@ -94,51 +91,42 @@ def list_tiktok_gifts(current_user: DBUser = Depends(get_current_user)):
 
 
 @router.get("/v1/gift-preferences", response_model=list[GiftPreferenceResponse])
-def list_gift_preferences(current_user: DBUser = Depends(get_current_user), db: Session = Depends(get_db)):
-    items = db.query(DBGiftPreference).filter(DBGiftPreference.owner_id == current_user.id).order_by(DBGiftPreference.gift_name.asc()).all()
-    return [_gift_to_schema(item) for item in items]
+async def list_gift_preferences(current_user: DBUser = Depends(get_current_user), db: AsyncSession = Depends(get_db)):
+    result = await db.execute(select(DBGiftPreference).where(DBGiftPreference.owner_id == current_user.id).order_by(DBGiftPreference.gift_name.asc()))
+    return [_gift_to_schema(item) for item in result.scalars().all()]
 
 
-@router.put("/v1/gift-preferences/{gift_id}", response_model=GiftPreferenceResponse)
-def upsert_gift_preference(gift_id: str, payload: GiftAlertPreferenceSchema, current_user: DBUser = Depends(get_current_user), db: Session = Depends(get_db)):
+@router.put("/v1/gift-preferences/{gift_id}")
+async def upsert_gift_preference(gift_id: str, payload: GiftAlertPreferenceSchema, current_user: DBUser = Depends(get_current_user), db: AsyncSession = Depends(get_db)):
     if current_user.plan.lower() != "pro":
         raise HTTPException(status_code=403, detail="Gift-specific alert settings are available on the Pro plan.")
     _validate_alert_payload(payload, current_user.id)
-
-    item = db.query(DBGiftPreference).filter(
-        DBGiftPreference.owner_id == current_user.id,
-        DBGiftPreference.gift_id == gift_id,
-    ).first()
-
+    result = await db.execute(select(DBGiftPreference).where(DBGiftPreference.owner_id == current_user.id, DBGiftPreference.gift_id == gift_id))
+    item = result.scalar_one_or_none()
     live_gift = _find_live_gift(current_user.id, gift_id)
     gift_name = live_gift.name if live_gift is not None else gift_id
-
     if item is None:
         item = DBGiftPreference(owner_id=current_user.id, gift_id=gift_id, gift_name=gift_name)
         db.add(item)
     elif live_gift is not None:
         item.gift_name = gift_name
-
     for field, value in payload.model_dump().items():
         setattr(item, field, value)
-
-    db.commit()
-    db.refresh(item)
+    await db.commit()
+    await db.refresh(item)
     return _gift_to_schema(item)
 
 
 @router.delete("/v1/gift-preferences/{gift_id}")
-def delete_gift_preference(gift_id: str, current_user: DBUser = Depends(get_current_user), db: Session = Depends(get_db)):
+async def delete_gift_preference(gift_id: str, current_user: DBUser = Depends(get_current_user), db: AsyncSession = Depends(get_db)):
     if current_user.plan.lower() != "pro":
         raise HTTPException(status_code=403, detail="Gift-specific alert settings are available on the Pro plan.")
-    item = db.query(DBGiftPreference).filter(
-        DBGiftPreference.owner_id == current_user.id,
-        DBGiftPreference.gift_id == gift_id,
-    ).first()
+    result = await db.execute(select(DBGiftPreference).where(DBGiftPreference.owner_id == current_user.id, DBGiftPreference.gift_id == gift_id))
+    item = result.scalar_one_or_none()
     if item is None:
         raise HTTPException(status_code=404, detail="Gift preference not found.")
-    db.delete(item)
-    db.commit()
+    await db.delete(item)
+    await db.commit()
     return {"message": "Gift-specific preference removed."}
 
 
@@ -149,7 +137,6 @@ async def upload_gift_custom_audio(file: UploadFile = File(...), current_user: D
     allowed = {"audio/mpeg", "audio/mp3", "audio/wav", "audio/x-wav", "audio/ogg", "audio/webm"}
     if file.content_type not in allowed:
         raise HTTPException(status_code=400, detail="Unsupported audio format. Use MP3, WAV, OGG, or WebM audio.")
-
     upload_dir = Path("uploads/gift-alerts")
     upload_dir.mkdir(parents=True, exist_ok=True)
     suffix = Path(file.filename or "audio").suffix.lower() or ".audio"
@@ -168,5 +155,4 @@ async def upload_gift_custom_audio(file: UploadFile = File(...), current_user: D
         raise
     finally:
         await file.close()
-
     return {"url": f"/uploads/gift-alerts/{filename}", "filename": filename, "size": size}
