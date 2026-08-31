@@ -1,4 +1,4 @@
-from sqlalchemy import Column, Integer, String, Boolean, ForeignKey, DateTime, Text
+from sqlalchemy import Column, Integer, String, Boolean, ForeignKey, DateTime, Text, UniqueConstraint
 from sqlalchemy.orm import relationship
 from app.database import Base
 
@@ -28,9 +28,11 @@ class DBUser(Base):
 
 class DBAudioAsset(Base):
     __tablename__ = "audio_assets"
+    __table_args__ = (UniqueConstraint("r2_key"),)
+
     id = Column(Integer, primary_key=True, index=True)
     name = Column(String, nullable=False)
-    r2_key = Column(String, nullable=False, index=True, unique=True)
+    r2_key = Column(String, nullable=False, index=True)
     public_url = Column(String, unique=True, nullable=False)
     owner_user_id = Column(Integer, ForeignKey("users.id", ondelete="CASCADE"), nullable=True, index=True)
     created_at = Column(UTCDateTime, nullable=False)
