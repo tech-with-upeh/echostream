@@ -1,6 +1,6 @@
 from fastapi import FastAPI
 
-from app.routers import auth, gifts, live, payments, prefrences, subscription_changes, voice, wstts
+from app.routers import auth, gifts, live, payments, prefrences, subscription_changes, voice, wstts, sounds
 import app.models
 
 app = FastAPI(title="EchoStream Backend API")
@@ -11,9 +11,9 @@ app.include_router(wstts.router)
 app.include_router(live.router)
 app.include_router(prefrences.router)
 app.include_router(gifts.router)
+app.include_router(sounds.router)
 app.include_router(payments.router)
 app.include_router(subscription_changes.router)
-
 
 @app.get("/")
 def health_check():
