@@ -4,9 +4,10 @@ import json
 import jwt
 from fastapi import APIRouter, Query, WebSocket, WebSocketDisconnect
 from jwt.exceptions import InvalidTokenError
+from sqlalchemy import select
 
 from app.config import settings
-from app.database import SessionLocal
+from app.database import AsyncSessionLocal
 from app.models import DBUser, DBUserPreferences
 from app.fish_audio import FishAudioError, stream_tts
 from app.routers.voice import tts_streaming_generator
@@ -15,15 +16,27 @@ from app.tiktok_manager import active_sessions
 router = APIRouter(tags=["Text-to-Speech (Live)"])
 
 
-def _get_user_from_token(token: str, db):
+async def _get_user_from_token(token: str):
     try:
         payload = jwt.decode(token, settings.JWT_SECRET_KEY, algorithms=[settings.ALGORITHM])
         user_id = payload.get("sub")
         if user_id is None or payload.get("type") != "access":
             return None
-        return db.query(DBUser).filter(DBUser.id == int(user_id)).first()
+        user_id = int(user_id)
     except (InvalidTokenError, ValueError, TypeError):
         return None
+
+    async with AsyncSessionLocal() as db:
+        result = await db.execute(select(DBUser).where(DBUser.id == user_id))
+        return result.scalar_one_or_none()
+
+
+async def _get_preferences(user_id: int):
+    async with AsyncSessionLocal() as db:
+        result = await db.execute(
+            select(DBUserPreferences).where(DBUserPreferences.user_id == user_id)
+        )
+        return result.scalar_one_or_none()
 
 
 def _status_payload(item: dict, event: str) -> dict:
@@ -44,11 +57,10 @@ def _status_payload(item: dict, event: str) -> dict:
 
 @router.websocket("/ws/v1/tts")
 async def live_tts_socket(websocket: WebSocket, token: str = Query(...)):
-    db = SessionLocal()
     user = None
     queue = None
     try:
-        user = _get_user_from_token(token, db)
+        user = await _get_user_from_token(token)
         if user is None:
             await websocket.close(code=4401)
             return
@@ -57,7 +69,7 @@ async def live_tts_socket(websocket: WebSocket, token: str = Query(...)):
         queue = active_sessions.get(user.id)
         tiktok_active = queue is not None
 
-        prefs = db.query(DBUserPreferences).filter(DBUserPreferences.user_id == user.id).first()
+        prefs = await _get_preferences(user.id)
         username = prefs.tiktok_username if prefs else None
 
         await websocket.send_json({"type": "ready", "message": "WebSocket connected",
@@ -80,38 +92,31 @@ async def live_tts_socket(websocket: WebSocket, token: str = Query(...)):
                     except json.JSONDecodeError:
                         await websocket.send_json({"type": "error", "detail": "Invalid JSON."})
                         continue
-                    if msg.get("type") == "test":
-                        text = (msg.get("text") or "EchoStream WebSocket test").strip()
-                        if not text:
-                            await websocket.send_json({"type": "error", "detail": "Test text cannot be empty."})
-                            continue
-                        current_prefs = db.query(DBUserPreferences).filter(DBUserPreferences.user_id == user.id).first()
-                        if current_prefs is None:
-                            await websocket.send_json({"type": "error", "detail": "Preferences not found."})
-                            continue
-                        await queue.put({"id": msg.get("id") or "ws-test", "event_type": "test", "alert_type": "tts",
-                                         "text": text, "provider": msg.get("provider") or current_prefs.tts_provider,
-                                         "voice": msg.get("voice") or current_prefs.voice,
-                                         "fish_voice_id": current_prefs.fish_voice_id,
-                                         "fish_model": msg.get("fish_model") or current_prefs.fish_model,
-                                         "pitch": current_prefs.pitch,
-                                         "speed": float(msg.get("speed", 1.0)), "volume": current_prefs.volume})
-                        continue
-                    if msg.get("type") != "speak":
+
+                    if msg.get("type") not in {"test", "speak"}:
                         await websocket.send_json({"type": "error", "detail": "Unknown message type."})
                         continue
-                    text = (msg.get("text") or "").strip()
+
+                    text = (msg.get("text") or ("EchoStream WebSocket test" if msg.get("type") == "test" else "")).strip()
                     if not text:
-                        await websocket.send_json({"type": "error", "id": msg.get("id"), "detail": "Text cannot be empty."})
+                        await websocket.send_json({"type": "error", "detail": "Text cannot be empty."})
                         continue
-                    current_prefs = db.query(DBUserPreferences).filter(DBUserPreferences.user_id == user.id).first()
-                    await queue.put({"id": msg.get("id"), "event_type": msg.get("event_type", "comment"), "alert_type": "tts",
-                                     "text": text, "provider": (msg.get("provider") or (current_prefs.tts_provider if current_prefs else "edge")).lower(),
+
+                    current_prefs = await _get_preferences(user.id)
+                    if msg.get("type") == "test" and current_prefs is None:
+                        await websocket.send_json({"type": "error", "detail": "Preferences not found."})
+                        continue
+
+                    await queue.put({"id": msg.get("id") or ("ws-test" if msg.get("type") == "test" else None),
+                                     "event_type": "test" if msg.get("type") == "test" else msg.get("event_type", "comment"),
+                                     "alert_type": "tts", "text": text,
+                                     "provider": (msg.get("provider") or (current_prefs.tts_provider if current_prefs else "edge")).lower(),
                                      "voice": msg.get("voice") or (current_prefs.voice if current_prefs else "en-US-GuyNeural"),
                                      "fish_voice_id": current_prefs.fish_voice_id if current_prefs else None,
                                      "fish_model": msg.get("fish_model") or (current_prefs.fish_model if current_prefs else settings.FISH_AUDIO_PRO_MODEL),
                                      "pitch": current_prefs.pitch if current_prefs else "+0Hz",
-                                     "speed": float(msg.get("speed", 1.0)), "volume": current_prefs.volume if current_prefs else 100})
+                                     "speed": float(msg.get("speed", 1.0)),
+                                     "volume": current_prefs.volume if current_prefs else 100})
             except WebSocketDisconnect:
                 return
 
@@ -152,4 +157,4 @@ async def live_tts_socket(websocket: WebSocket, token: str = Query(...)):
         # The live session owns the queue. A WebSocket disconnect must not
         # remove it because TikTok can continue producing events and a later
         # WebSocket connection must be able to consume the same queue.
-        db.close()
+        pass
