@@ -1,7 +1,8 @@
 from fastapi import APIRouter, Depends, HTTPException
+from sqlalchemy import select
+from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.database import SessionLocal
-from app.dependencies import get_current_user
+from app.dependencies import get_current_user, get_db
 from app.live_runtime import LiveEventQueue, get_live_status, set_live_state, stop_runtime_session
 from app.models import DBUser, DBUserPreferences
 from app.tiktok_manager import active_sessions, start_tiktok_session, stop_tiktok_session
@@ -9,14 +10,18 @@ from app.tiktok_manager import active_sessions, start_tiktok_session, stop_tikto
 router = APIRouter(tags=["Live Sessions"])
 
 
+async def _get_preferences(user_id: int, db: AsyncSession) -> DBUserPreferences | None:
+    result = await db.execute(select(DBUserPreferences).where(DBUserPreferences.user_id == user_id))
+    return result.scalar_one_or_none()
+
+
 @router.post("/v1/live/start")
-async def go_live(current_user: DBUser = Depends(get_current_user)):
-    db = SessionLocal()
-    try:
-        prefs = db.query(DBUserPreferences).filter(DBUserPreferences.user_id == current_user.id).first()
-        tiktok_username = (prefs.tiktok_username or "").strip() if prefs else ""
-    finally:
-        db.close()
+async def go_live(
+    current_user: DBUser = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    prefs = await _get_preferences(current_user.id, db)
+    tiktok_username = (prefs.tiktok_username or "").strip() if prefs else ""
     if not tiktok_username:
         raise HTTPException(status_code=422, detail="Set your TikTok username in preferences before starting a live session.")
     existing = get_live_status(current_user.id, username=tiktok_username)
@@ -38,11 +43,10 @@ async def stop_live(current_user: DBUser = Depends(get_current_user)):
 
 
 @router.get("/v1/live/status")
-async def live_status(current_user: DBUser = Depends(get_current_user)):
-    db = SessionLocal()
-    try:
-        prefs = db.query(DBUserPreferences).filter(DBUserPreferences.user_id == current_user.id).first()
-        username = (prefs.tiktok_username or "").strip() if prefs else None
-    finally:
-        db.close()
+async def live_status(
+    current_user: DBUser = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    prefs = await _get_preferences(current_user.id, db)
+    username = (prefs.tiktok_username or "").strip() if prefs else None
     return get_live_status(current_user.id, username=username)
