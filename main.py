@@ -3,11 +3,11 @@ from pathlib import Path
 from fastapi import FastAPI
 from fastapi.staticfiles import StaticFiles
 
-from app.database import Base, engine
+from app.database import Base, sync_engine
 from app.routers import auth, gifts, live, payments, prefrences, subscription_changes, voice, wstts
 import app.models
 
-Base.metadata.create_all(bind=engine)
+Base.metadata.create_all(bind=sync_engine)
 Path("uploads/gift-alerts").mkdir(parents=True, exist_ok=True)
 
 app = FastAPI(title="EchoStream Backend API")
