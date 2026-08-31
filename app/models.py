@@ -13,6 +13,7 @@ class DBUser(Base):
     hashed_password = Column(String, nullable=False)
     is_active = Column(Boolean, default=True)
     is_verified = Column(Boolean, default=False)
+    is_admin = Column(Boolean, nullable=False, default=False)
     plan = Column(String, nullable=False, default="starter")
     subscription_status = Column(String, nullable=False, default="active")
     trial_ends_at = Column(UTCDateTime, nullable=True)
@@ -23,6 +24,18 @@ class DBUser(Base):
     fish_voices = relationship("DBFishVoice", back_populates="user", cascade="all, delete-orphan")
     muted_users = relationship("DBMutedUser", back_populates="owner", cascade="all, delete-orphan")
     gift_preferences = relationship("DBGiftPreference", back_populates="owner", cascade="all, delete-orphan")
+    audio_assets = relationship("DBAudioAsset", back_populates="owner", cascade="all, delete-orphan")
+
+class DBAudioAsset(Base):
+    __tablename__ = "audio_assets"
+    id = Column(Integer, primary_key=True, index=True)
+    name = Column(String, nullable=False)
+    r2_key = Column(String, unique=True, nullable=False, index=True)
+    public_url = Column(String, unique=True, nullable=False)
+    owner_user_id = Column(Integer, ForeignKey("users.id", ondelete="CASCADE"), nullable=True, index=True)
+    created_at = Column(UTCDateTime, nullable=False)
+    updated_at = Column(UTCDateTime, nullable=False)
+    owner = relationship("DBUser", back_populates="audio_assets")
 
 class DBRefreshToken(Base):
     __tablename__ = "refresh_tokens"
@@ -95,6 +108,7 @@ class DBUserPreferences(Base):
     gift_fish_voice_id = Column(String, nullable=True)
     gift_fish_model = Column(String, nullable=True)
     gift_system_sound_id = Column(String, nullable=True)
+    gift_custom_audio_id = Column(Integer, ForeignKey("audio_assets.id", ondelete="SET NULL"), nullable=True)
     gift_custom_audio_url = Column(String, nullable=True)
     gift_volume = Column(Integer, nullable=False, default=100)
     gift_speed = Column(Integer, nullable=False, default=100)
@@ -107,6 +121,7 @@ class DBUserPreferences(Base):
     spam_cooldown_seconds = Column(Integer, nullable=False, default=2)
     spam_max_requests_per_minute = Column(Integer, nullable=False, default=10)
     user = relationship("DBUser", back_populates="preferences")
+    gift_custom_audio = relationship("DBAudioAsset", foreign_keys=[gift_custom_audio_id])
 
 class DBGiftPreference(Base):
     __tablename__ = "gift_preferences"
@@ -122,11 +137,13 @@ class DBGiftPreference(Base):
     fish_voice_id = Column(String, nullable=True)
     fish_model = Column(String, nullable=True)
     system_sound_id = Column(String, nullable=True)
+    custom_audio_id = Column(Integer, ForeignKey("audio_assets.id", ondelete="SET NULL"), nullable=True)
     custom_audio_url = Column(String, nullable=True)
     volume = Column(Integer, nullable=True)
     speed = Column(Integer, nullable=True)
     pitch = Column(String, nullable=True)
     owner = relationship("DBUser", back_populates="gift_preferences")
+    custom_audio = relationship("DBAudioAsset", foreign_keys=[custom_audio_id])
 
 class DBFishVoice(Base):
     __tablename__ = "fish_voices"
