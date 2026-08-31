@@ -2,7 +2,7 @@ fastapi[standard]
 pyjwt
 bcrypt
 sqlalchemy
-psycopg2-binary
+asyncpg
 pydantic-settings
 fastapi-mail
 google-auth
