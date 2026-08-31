@@ -64,15 +64,21 @@ class DBResetPassVerificationCode(Base):
 
 class DBSubscription(Base):
     __tablename__ = "subscriptions"
+    __table_args__ = (
+        UniqueConstraint("user_id"),
+        UniqueConstraint("paystack_subscription_code"),
+        UniqueConstraint("reference"),
+    )
+
     id = Column(Integer, primary_key=True, index=True)
-    user_id = Column(Integer, ForeignKey("users.id", ondelete="CASCADE"), unique=True, nullable=False)
+    user_id = Column(Integer, ForeignKey("users.id", ondelete="CASCADE"), nullable=False)
     plan = Column(String, nullable=False)
     status = Column(String, nullable=False, default="pending")
     paystack_customer_code = Column(String, nullable=True, index=True)
-    paystack_subscription_code = Column(String, nullable=True, unique=True, index=True)
+    paystack_subscription_code = Column(String, nullable=True, index=True)
     paystack_email_token = Column(String, nullable=True)
     authorization_code = Column(String, nullable=True)
-    reference = Column(String, nullable=True, unique=True, index=True)
+    reference = Column(String, nullable=True, index=True)
     current_period_start = Column(UTCDateTime, nullable=True)
     current_period_end = Column(UTCDateTime, nullable=True)
     cancel_at_period_end = Column(Boolean, default=False)
