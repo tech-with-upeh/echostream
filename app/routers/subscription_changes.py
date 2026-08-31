@@ -2,7 +2,8 @@ import json
 from datetime import datetime, timezone
 
 from fastapi import APIRouter, Depends, HTTPException
-from sqlalchemy.orm import Session
+from sqlalchemy import select
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import settings
 from app.dependencies import get_current_user, get_db
@@ -71,7 +72,7 @@ async def change_subscription_plan(
     plan: str,
     interval: str,
     current_user: DBUser = Depends(get_current_user),
-    db: Session = Depends(get_db),
+    db: AsyncSession = Depends(get_db),
 ):
     plan = plan.strip().lower()
     interval = interval.strip().lower()
@@ -81,7 +82,8 @@ async def change_subscription_plan(
     if interval not in VALID_INTERVALS:
         raise HTTPException(status_code=400, detail="Invalid billing interval. Use month or year.")
 
-    subscription = current_user.subscription
+    result = await db.execute(select(DBSubscription).where(DBSubscription.user_id == current_user.id))
+    subscription = result.scalar_one_or_none()
     if not subscription:
         raise HTTPException(status_code=400, detail="No subscription record found")
 
@@ -121,7 +123,7 @@ async def change_subscription_plan(
         set_metadata(subscription, metadata)
         subscription.last_event = "subscription.change.payment_pending"
         subscription.updated_at = now_utc()
-        db.commit()
+        await db.commit()
 
         return {
             "status": "payment_required",
@@ -186,7 +188,7 @@ async def change_subscription_plan(
     subscription.status = "non_renewing"
     subscription.last_event = "subscription.change_scheduled"
     subscription.updated_at = now_utc()
-    db.commit()
+    await db.commit()
 
     return {
         "status": "scheduled",
@@ -205,19 +207,25 @@ async def change_subscription_plan(
 async def verify_payment(
     reference: str,
     current_user: DBUser = Depends(get_current_user),
-    db: Session = Depends(get_db),
+    db: AsyncSession = Depends(get_db),
 ):
     """Verify any EchoStream Paystack payment in one endpoint."""
-    subscription = db.query(DBSubscription).filter(
-        DBSubscription.user_id == current_user.id,
-        DBSubscription.reference == reference,
-    ).first()
+    result = await db.execute(
+        select(DBSubscription).where(
+            DBSubscription.user_id == current_user.id,
+            DBSubscription.reference == reference,
+        )
+    )
+    subscription = result.scalar_one_or_none()
 
     if not subscription:
-        subscription = db.query(DBSubscription).filter(
-            DBSubscription.user_id == current_user.id,
-            DBSubscription.metadata_json.like(f'%"pending_change_reference": "{reference}"%'),
-        ).first()
+        result = await db.execute(
+            select(DBSubscription).where(
+                DBSubscription.user_id == current_user.id,
+                DBSubscription.metadata_json.like(f'%"pending_change_reference": "{reference}"%'),
+            )
+        )
+        subscription = result.scalar_one_or_none()
 
     if not subscription:
         raise HTTPException(status_code=404, detail="Payment reference not found")
@@ -288,7 +296,7 @@ async def verify_payment(
     current_user.subscription_status = "active"
     current_user.subscription_ends_at = period_end
 
-    db.commit()
+    await db.commit()
 
     return {
         "status": "success",
