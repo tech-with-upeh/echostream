@@ -6,6 +6,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.dependencies import get_current_user, get_db
 from app.models import DBUser, DBUserPreferences
+from app.r2_storage import is_owned_gift_audio_url
 from app.schemas import PreferencesSchema
 
 router = APIRouter(tags=["Preferences"])
@@ -72,6 +73,8 @@ async def update_preferences(payload: PreferencesSchema, current_user: DBUser = 
         raise HTTPException(status_code=403, detail="These advanced TTS and spam-protection settings are available on the Pro plan.")
     if payload.gift_alert_type == "tts" and payload.gift_tts_provider == "fish" and not is_pro:
         raise HTTPException(status_code=403, detail="Fish Audio gift alerts are available on the Pro plan.")
+    if payload.gift_custom_audio_url and not is_owned_gift_audio_url(payload.gift_custom_audio_url, current_user.id):
+        raise HTTPException(status_code=403, detail="Custom audio must belong to the current user.")
 
     for field in ["tiktok_username", "tts_provider", "voice", "fish_voice_id", "fish_model", "pitch", "volume", "speed",
                   "emoji_to_words", "filter_profanity", "require_command_prefix", "max_message_length", "comment_speech_enabled",
