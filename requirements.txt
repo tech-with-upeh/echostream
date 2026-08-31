@@ -8,3 +8,4 @@ fastapi-mail
 google-auth
 edge-tts
 httpx
+alembic
