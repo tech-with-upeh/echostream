@@ -7,19 +7,15 @@ class UserRegisterSchema(BaseModel):
     last_name: str
     email: EmailStr
     password: str
-
 class UserLoginSchema(BaseModel):
     email: EmailStr
     password: str
-
 class UserForgotPasswordSchema(BaseModel):
     email: EmailStr
-
 class UserResetPasswordSchema(BaseModel):
     token: str
     email: EmailStr
     password: str
-
 class UserResponse(BaseModel):
     id: int
     first_name: str
@@ -30,43 +26,33 @@ class UserResponse(BaseModel):
     subscription_status: str
     trial_ends_at: Optional[datetime] = None
     subscription_ends_at: Optional[datetime] = None
-    class Config:
-        from_attributes = True
-
+    class Config: from_attributes = True
 class TokenResponse(BaseModel):
     access_token: str
     refresh_token: str
     token_type: str = "bearer"
-
 class RefreshRequestSchema(BaseModel):
     refresh_token: str
-
 class ResendEmailSchema(BaseModel):
     email: EmailStr
-
 class VerifyEmailWithCodeSchema(BaseModel):
     email: EmailStr
     code: str
-
 class ResendVerificationSchema(BaseModel):
     email: EmailStr
-
 class SocialAuthSchema(BaseModel):
     id_token: str
-
 class TTSTextPayloadSchema(BaseModel):
     text: str
     voice: str | None = None
     provider: str | None = None
     fish_model: str | None = None
     speed: float = Field(1.0, ge=0.5, le=2.0)
-
 class VoiceDetailSchema(BaseModel):
     name: str
     short_name: str
     gender: str
     locale: str
-
 class FishVoiceDetailSchema(BaseModel):
     id: str
     name: str
@@ -75,11 +61,16 @@ class FishVoiceDetailSchema(BaseModel):
     description: str = ""
     languages: list[str] = Field(default_factory=list)
     visibility: str = "public"
-
 class TTSVoiceCatalogSchema(BaseModel):
     edge: list[VoiceDetailSchema]
     fish: list[FishVoiceDetailSchema] = Field(default_factory=list)
-
+class AudioAssetResponse(BaseModel):
+    id: int
+    name: str
+    public_url: str
+    created_at: datetime
+    updated_at: datetime
+    class Config: from_attributes = True
 class GiftAlertPreferenceSchema(BaseModel):
     enabled: bool = True
     alert_type: str = Field("tts", pattern="^(tts|system_sound|custom_audio)$")
@@ -89,26 +80,22 @@ class GiftAlertPreferenceSchema(BaseModel):
     fish_voice_id: str | None = None
     fish_model: str | None = Field(None, pattern="^(s2-pro|s2\.1-pro-free)$")
     system_sound_id: str | None = None
+    custom_audio_id: int | None = None
     custom_audio_url: str | None = None
     volume: int | None = Field(None, ge=0, le=100)
     speed: int | None = Field(None, ge=50, le=200)
     pitch: str | None = None
-
 class GiftPreferenceResponse(GiftAlertPreferenceSchema):
     id: int
     gift_id: str
     gift_name: str
-
-class GenericGiftPreferenceSchema(GiftAlertPreferenceSchema):
-    pass
-
+class GenericGiftPreferenceSchema(GiftAlertPreferenceSchema): pass
 class TikTokGiftSchema(BaseModel):
     id: str
     name: str
     diamond_count: int | None = None
     type: int | None = None
     image_url: str | None = None
-
 class PreferencesSchema(BaseModel):
     tiktok_username: str | None = None
     tts_provider: str = Field("edge", pattern="^(edge|fish)$")
@@ -134,6 +121,7 @@ class PreferencesSchema(BaseModel):
     gift_fish_voice_id: str | None = None
     gift_fish_model: str | None = None
     gift_system_sound_id: str | None = None
+    gift_custom_audio_id: int | None = None
     gift_custom_audio_url: str | None = None
     gift_volume: int = Field(100, ge=0, le=100)
     gift_speed: int = Field(100, ge=50, le=200)
@@ -145,9 +133,7 @@ class PreferencesSchema(BaseModel):
     auto_mute_repeat_offenders: bool = False
     spam_cooldown_seconds: int = Field(2, ge=1, le=60)
     spam_max_requests_per_minute: int = Field(10, ge=1, le=120)
-    class Config:
-        from_attributes = True
-
+    class Config: from_attributes = True
 class FishVoiceCloneResponse(BaseModel):
     voice_id: str
     provider: str = "fish"
