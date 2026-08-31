@@ -1,4 +1,3 @@
-import uuid
 from urllib.parse import urlparse
 
 from fastapi import APIRouter, Depends, File, HTTPException, UploadFile
