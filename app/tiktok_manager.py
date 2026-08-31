@@ -7,11 +7,12 @@ from collections import defaultdict, deque
 from datetime import datetime, timezone
 from typing import Dict
 
-from sqlalchemy.orm import Session
+from sqlalchemy import select
+from sqlalchemy.ext.asyncio import AsyncSession
 from TikTokLive import TikTokLiveClient
 from TikTokLive.events import ConnectEvent, CommentEvent, DisconnectEvent, FollowEvent, GiftEvent, LikeEvent
 
-from app.database import SessionLocal
+from app.database import AsyncSessionLocal
 from app.live_runtime import mark_live_failed, mark_live_ready
 from app.models import DBGiftPreference, DBMutedUser, DBUser, DBUserPreferences
 
@@ -27,15 +28,11 @@ _PROFANITY = {"fuck", "fucking", "shit", "bitch", "asshole", "motherfucker"}
 _INITIAL_SYNC_SECONDS = 2.0
 
 
-def _load_user_and_preferences(user_id: int):
-    db: Session = SessionLocal()
-    try:
-        return (
-            db.query(DBUser).filter(DBUser.id == user_id).first(),
-            db.query(DBUserPreferences).filter(DBUserPreferences.user_id == user_id).first(),
-        )
-    finally:
-        db.close()
+async def _load_user_and_preferences(user_id: int):
+    async with AsyncSessionLocal() as db:
+        user_result = await db.execute(select(DBUser).where(DBUser.id == user_id))
+        prefs_result = await db.execute(select(DBUserPreferences).where(DBUserPreferences.user_id == user_id))
+        return user_result.scalar_one_or_none(), prefs_result.scalar_one_or_none()
 
 
 def _apply_template(template: str, username: str, comment: str = "", gift: str = "", count: int = 1, event_type: str = "") -> str:
@@ -88,25 +85,33 @@ def _allowed_user(event, prefs) -> bool:
     return not configured or "all" in configured or _user_role(event) in configured
 
 
-def _muted(owner_id: int, tiktok_user_id: str | None, username: str) -> bool:
-    db = SessionLocal()
-    try:
-        q = db.query(DBMutedUser).filter(DBMutedUser.owner_id == owner_id)
-        return bool((tiktok_user_id and q.filter(DBMutedUser.tiktok_user_id == tiktok_user_id).first()) or q.filter(DBMutedUser.tiktok_username.ilike(username)).first())
-    finally:
-        db.close()
+async def _muted(owner_id: int, tiktok_user_id: str | None, username: str) -> bool:
+    async with AsyncSessionLocal() as db:
+        query = select(DBMutedUser).where(DBMutedUser.owner_id == owner_id)
+        if tiktok_user_id:
+            result = await db.execute(query.where(DBMutedUser.tiktok_user_id == tiktok_user_id))
+            if result.scalar_one_or_none() is not None:
+                return True
+        result = await db.execute(query.where(DBMutedUser.tiktok_username.ilike(username)))
+        return result.scalar_one_or_none() is not None
 
 
-def _auto_mute(owner_id: int, tiktok_user_id: str | None, username: str) -> None:
-    db = SessionLocal()
-    try:
-        q = db.query(DBMutedUser).filter(DBMutedUser.owner_id == owner_id)
-        existing = q.filter(DBMutedUser.tiktok_user_id == tiktok_user_id).first() if tiktok_user_id else q.filter(DBMutedUser.tiktok_username.ilike(username)).first()
-        if not existing:
-            db.add(DBMutedUser(owner_id=owner_id, tiktok_user_id=tiktok_user_id, tiktok_username=username, reason="spam", created_at=datetime.now(timezone.utc).replace(tzinfo=None)))
-            db.commit()
-    finally:
-        db.close()
+async def _auto_mute(owner_id: int, tiktok_user_id: str | None, username: str) -> None:
+    async with AsyncSessionLocal() as db:
+        query = select(DBMutedUser).where(DBMutedUser.owner_id == owner_id)
+        if tiktok_user_id:
+            result = await db.execute(query.where(DBMutedUser.tiktok_user_id == tiktok_user_id))
+        else:
+            result = await db.execute(query.where(DBMutedUser.tiktok_username.ilike(username)))
+        if result.scalar_one_or_none() is None:
+            db.add(DBMutedUser(
+                owner_id=owner_id,
+                tiktok_user_id=tiktok_user_id,
+                tiktok_username=username,
+                reason="spam",
+                created_at=datetime.now(timezone.utc).replace(tzinfo=None),
+            ))
+            await db.commit()
 
 
 def _spam_blocked(user_id: int, username: str, prefs) -> tuple[bool, bool]:
@@ -128,12 +133,15 @@ def _spam_blocked(user_id: int, username: str, prefs) -> tuple[bool, bool]:
     return False, False
 
 
-def _gift_override(user_id: int, gift_id: str):
-    db = SessionLocal()
-    try:
-        return db.query(DBGiftPreference).filter(DBGiftPreference.owner_id == user_id, DBGiftPreference.gift_id == gift_id).first()
-    finally:
-        db.close()
+async def _gift_override(user_id: int, gift_id: str):
+    async with AsyncSessionLocal() as db:
+        result = await db.execute(
+            select(DBGiftPreference).where(
+                DBGiftPreference.owner_id == user_id,
+                DBGiftPreference.gift_id == gift_id,
+            )
+        )
+        return result.scalar_one_or_none()
 
 
 def _event_time(event) -> float | None:
@@ -170,7 +178,7 @@ async def _enqueue_event_tts(queue, prefs, msg_id, event_type, username, gift=""
 
 
 async def _enqueue_gift_alert(queue, user_id, prefs, msg_id, username, gift_id, gift_name, count):
-    override = _gift_override(user_id, gift_id)
+    override = await _gift_override(user_id, gift_id)
     if override is not None:
         if not override.enabled:
             return
@@ -211,7 +219,7 @@ async def _enqueue_gift_alert(queue, user_id, prefs, msg_id, username, gift_id, 
 async def start_tiktok_session(user_id: int, tiktok_username: str) -> None:
     if user_id in active_tiktok_clients:
         return
-    user, _ = _load_user_and_preferences(user_id)
+    user, _ = await _load_user_and_preferences(user_id)
     if user is None:
         mark_live_failed(user_id, active_sessions, "user not found")
         return
@@ -241,13 +249,13 @@ async def start_tiktok_session(user_id: int, tiktok_username: str) -> None:
         queue = active_sessions.get(user_id)
         if queue is None or not getattr(queue, "ready", False) or not _is_after_join_boundary(user_id, event):
             return
-        _, prefs = _load_user_and_preferences(user_id)
+        _, prefs = await _load_user_and_preferences(user_id)
         if prefs is None or not prefs.comment_speech_enabled:
             return
         username = (getattr(event.user, "nickname", None) or getattr(event.user, "unique_id", None) or "someone") if event.user else "someone"
         uid = str(getattr(event.user, "user_id", None) or getattr(event.user, "uid", None) or "") or None
         comment = (getattr(event, "comment", "") or "").strip()
-        if not comment or _muted(user_id, uid, username) or not _allowed_user(event, prefs):
+        if not comment or await _muted(user_id, uid, username) or not _allowed_user(event, prefs):
             return
         if prefs.require_command_prefix:
             if not comment.startswith("!"):
@@ -260,12 +268,15 @@ async def start_tiktok_session(user_id: int, tiktok_username: str) -> None:
         if prefs.filter_profanity and _contains_blocked_word(comment, list(_PROFANITY)):
             return
         if prefs.spam_protection_enabled and prefs.block_repeated_words and _contains_repeated_words(comment):
-            key = (user_id, username.lower()); _repeat_violations[key] += 1
-            if prefs.auto_mute_repeat_offenders and _repeat_violations[key] >= 3: _auto_mute(user_id, uid, username)
+            key = (user_id, username.lower())
+            _repeat_violations[key] += 1
+            if prefs.auto_mute_repeat_offenders and _repeat_violations[key] >= 3:
+                await _auto_mute(user_id, uid, username)
             return
         blocked, mute = _spam_blocked(user_id, username, prefs)
         if blocked:
-            if mute: _auto_mute(user_id, uid, username)
+            if mute:
+                await _auto_mute(user_id, uid, username)
             return
         speech = _apply_template(prefs.comment_speech_template or "{{user}} said {{comment}}", username, comment=comment)
         if speech.strip():
@@ -278,29 +289,35 @@ async def start_tiktok_session(user_id: int, tiktok_username: str) -> None:
         queue = active_sessions.get(user_id)
         if queue is None or not getattr(queue, "ready", False) or not _is_after_join_boundary(user_id, event) or getattr(event, "gift", None) is None or bool(getattr(event, "streaking", False)):
             return
-        _, prefs = _load_user_and_preferences(user_id)
-        if prefs is None: return
+        _, prefs = await _load_user_and_preferences(user_id)
+        if prefs is None:
+            return
         gift = event.gift
         await _enqueue_gift_alert(queue, user_id, prefs, str(getattr(getattr(event, "common", None), "msg_id", id(event))), getattr(event.user, "nickname", None) or "someone", str(getattr(gift, "id", None) or getattr(event, "gift_id", None) or ""), str(getattr(gift, "name", None) or "gift"), int(getattr(event, "repeat_count", 1) or 1))
 
     @client.on(FollowEvent)
     async def on_follow(event: FollowEvent):
         queue = active_sessions.get(user_id)
-        if queue is None or not getattr(queue, "ready", False) or not _is_after_join_boundary(user_id, event): return
-        _, prefs = _load_user_and_preferences(user_id)
-        if prefs: await _enqueue_event_tts(queue, prefs, str(getattr(getattr(event, "common", None), "msg_id", id(event))), "follow", getattr(event.user, "nickname", None) or "someone")
+        if queue is None or not getattr(queue, "ready", False) or not _is_after_join_boundary(user_id, event):
+            return
+        _, prefs = await _load_user_and_preferences(user_id)
+        if prefs:
+            await _enqueue_event_tts(queue, prefs, str(getattr(getattr(event, "common", None), "msg_id", id(event))), "follow", getattr(event.user, "nickname", None) or "someone")
 
     @client.on(LikeEvent)
     async def on_like(event: LikeEvent):
         queue = active_sessions.get(user_id)
-        if queue is None or not getattr(queue, "ready", False) or not _is_after_join_boundary(user_id, event): return
-        _, prefs = _load_user_and_preferences(user_id)
-        if prefs: await _enqueue_event_tts(queue, prefs, str(getattr(getattr(event, "common", None), "msg_id", id(event))), "like", getattr(event.user, "nickname", None) or "someone", count=int(getattr(event, "count", 1) or 1))
+        if queue is None or not getattr(queue, "ready", False) or not _is_after_join_boundary(user_id, event):
+            return
+        _, prefs = await _load_user_and_preferences(user_id)
+        if prefs:
+            await _enqueue_event_tts(queue, prefs, str(getattr(getattr(event, "common", None), "msg_id", id(event))), "like", getattr(event.user, "nickname", None) or "someone", count=int(getattr(event, "count", 1) or 1))
 
     @client.on(DisconnectEvent)
     async def on_disconnect(_event: DisconnectEvent):
         task = _warmup_tasks.pop(user_id, None)
-        if task: task.cancel()
+        if task:
+            task.cancel()
         active_tiktok_clients.pop(user_id, None)
         _join_boundaries.pop(user_id, None)
         if user_id in _intentional_stops:
@@ -324,10 +341,13 @@ async def start_tiktok_session(user_id: int, tiktok_username: str) -> None:
 async def stop_tiktok_session(user_id: int) -> None:
     _intentional_stops.add(user_id)
     task = _warmup_tasks.pop(user_id, None)
-    if task: task.cancel()
+    if task:
+        task.cancel()
     _join_boundaries.pop(user_id, None)
     client = active_tiktok_clients.pop(user_id, None)
     if client is not None:
         await client.disconnect()
     for key in [key for key in _request_times if key[0] == user_id]:
-        _request_times.pop(key, None); _last_request_at.pop(key, None); _repeat_violations.pop(key, None)
+        _request_times.pop(key, None)
+        _last_request_at.pop(key, None)
+        _repeat_violations.pop(key, None)
