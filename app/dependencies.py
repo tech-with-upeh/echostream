@@ -4,24 +4,25 @@ import jwt
 from fastapi import Depends, HTTPException, status
 from fastapi.security import OAuth2PasswordBearer
 from jwt.exceptions import InvalidTokenError
-from sqlalchemy.orm import Session
+from sqlalchemy import select
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import settings
-from app.database import SessionLocal
+from app.database import AsyncSessionLocal
 from app.models import DBUser
 
 oauth2_scheme = OAuth2PasswordBearer(tokenUrl="login")
 
 
-def get_db():
-    db = SessionLocal()
-    try:
+async def get_db():
+    async with AsyncSessionLocal() as db:
         yield db
-    finally:
-        db.close()
 
 
-def get_current_user(token: str = Depends(oauth2_scheme), db: Session = Depends(get_db)) -> DBUser:
+async def get_current_user(
+    token: str = Depends(oauth2_scheme),
+    db: AsyncSession = Depends(get_db),
+) -> DBUser:
     credentials_exception = HTTPException(
         status_code=status.HTTP_401_UNAUTHORIZED,
         detail="Could not validate credentials",
@@ -33,26 +34,28 @@ def get_current_user(token: str = Depends(oauth2_scheme), db: Session = Depends(
         token_type: str = payload.get("type")
         if user_id is None or token_type != "access":
             raise credentials_exception
-    except (InvalidTokenError, ValueError):
+        user_id = int(user_id)
+    except (InvalidTokenError, ValueError, TypeError):
         raise credentials_exception
 
-    db_user = db.query(DBUser).filter(DBUser.id == int(user_id)).first()
+    result = await db.execute(select(DBUser).where(DBUser.id == user_id))
+    db_user = result.scalar_one_or_none()
     if db_user is None:
         raise credentials_exception
     return db_user
 
 
-def require_active_subscription(
+async def require_active_subscription(
     current_user: DBUser = Depends(get_current_user),
-    db: Session = Depends(get_db),
+    db: AsyncSession = Depends(get_db),
 ) -> DBUser:
     """Require an active trial or paid subscription."""
     now_utc = datetime.now(timezone.utc)
 
     if current_user.subscription_status == "free_trial":
-        if current_user.trial_ends_at.replace(tzinfo=timezone.utc) < now_utc:
+        if current_user.trial_ends_at and current_user.trial_ends_at.replace(tzinfo=timezone.utc) < now_utc:
             current_user.subscription_status = "expired"
-            db.commit()
+            await db.commit()
             raise HTTPException(
                 status_code=status.HTTP_402_PAYMENT_REQUIRED,
                 detail="Your free trial has expired. Please upgrade to a premium plan to continue.",
@@ -60,7 +63,7 @@ def require_active_subscription(
     elif current_user.subscription_status == "active":
         if current_user.subscription_ends_at and current_user.subscription_ends_at.replace(tzinfo=timezone.utc) < now_utc:
             current_user.subscription_status = "expired"
-            db.commit()
+            await db.commit()
             raise HTTPException(
                 status_code=status.HTTP_402_PAYMENT_REQUIRED,
                 detail="Your subscription plan has expired or billing failed. Please update your payment details.",
@@ -74,7 +77,7 @@ def require_active_subscription(
     return current_user
 
 
-def require_pro_subscription(
+async def require_pro_subscription(
     current_user: DBUser = Depends(require_active_subscription),
 ) -> DBUser:
     """Require the Pro plan for Fish Audio features."""
