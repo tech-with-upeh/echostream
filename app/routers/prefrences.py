@@ -1,7 +1,8 @@
 import json
 
 from fastapi import APIRouter, Depends, HTTPException
-from sqlalchemy.orm import Session
+from sqlalchemy import select
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.dependencies import get_current_user, get_db
 from app.models import DBUser, DBUserPreferences
@@ -19,10 +20,14 @@ def _parse_list(value: str | None, default: list[str]) -> list[str]:
     return [item.strip() for item in value.split(",") if item.strip()] or default
 
 
-def _get_or_create_preferences(current_user: DBUser, db: Session) -> DBUserPreferences:
-    prefs = db.query(DBUserPreferences).filter(DBUserPreferences.user_id == current_user.id).first()
+async def _get_or_create_preferences(current_user: DBUser, db: AsyncSession) -> DBUserPreferences:
+    result = await db.execute(select(DBUserPreferences).where(DBUserPreferences.user_id == current_user.id))
+    prefs = result.scalar_one_or_none()
     if prefs is None:
-        prefs = DBUserPreferences(user_id=current_user.id); db.add(prefs); db.commit(); db.refresh(prefs)
+        prefs = DBUserPreferences(user_id=current_user.id)
+        db.add(prefs)
+        await db.commit()
+        await db.refresh(prefs)
     return prefs
 
 
@@ -49,13 +54,13 @@ def _serialize(prefs: DBUserPreferences) -> PreferencesSchema:
 
 
 @router.get("/v1/preferences", response_model=PreferencesSchema)
-def get_preferences(current_user: DBUser = Depends(get_current_user), db: Session = Depends(get_db)):
-    return _serialize(_get_or_create_preferences(current_user, db))
+async def get_preferences(current_user: DBUser = Depends(get_current_user), db: AsyncSession = Depends(get_db)):
+    return _serialize(await _get_or_create_preferences(current_user, db))
 
 
 @router.put("/v1/preferences", response_model=PreferencesSchema)
-def update_preferences(payload: PreferencesSchema, current_user: DBUser = Depends(get_current_user), db: Session = Depends(get_db)):
-    prefs = _get_or_create_preferences(current_user, db)
+async def update_preferences(payload: PreferencesSchema, current_user: DBUser = Depends(get_current_user), db: AsyncSession = Depends(get_db)):
+    prefs = await _get_or_create_preferences(current_user, db)
     is_pro = current_user.plan.lower() == "pro"
     if payload.tts_provider == "fish" and not is_pro:
         raise HTTPException(status_code=403, detail="Fish Audio is available on the Pro plan.")
@@ -77,30 +82,38 @@ def update_preferences(payload: PreferencesSchema, current_user: DBUser = Depend
         setattr(prefs, field, getattr(payload, field))
     prefs.allowed_user_types = json.dumps(payload.allowed_user_types)
     prefs.blocked_words = json.dumps(payload.blocked_words)
-    db.commit(); db.refresh(prefs)
+    await db.commit()
+    await db.refresh(prefs)
     return _serialize(prefs)
 
 
 @router.get("/v1/muted-users")
-def list_muted_users(current_user: DBUser = Depends(get_current_user), db: Session = Depends(get_db)):
+async def list_muted_users(current_user: DBUser = Depends(get_current_user), db: AsyncSession = Depends(get_db)):
     from app.models import DBMutedUser
-    return db.query(DBMutedUser).filter(DBMutedUser.owner_id == current_user.id).order_by(DBMutedUser.created_at.desc()).all()
+    result = await db.execute(select(DBMutedUser).where(DBMutedUser.owner_id == current_user.id).order_by(DBMutedUser.created_at.desc()))
+    return result.scalars().all()
 
 
 @router.post("/v1/muted-users")
-def mute_user(payload: dict, current_user: DBUser = Depends(get_current_user), db: Session = Depends(get_db)):
+async def mute_user(payload: dict, current_user: DBUser = Depends(get_current_user), db: AsyncSession = Depends(get_db)):
     from datetime import datetime, timezone
     from app.models import DBMutedUser
     username = str(payload.get("tiktok_username", "")).strip()
     if not username: raise HTTPException(status_code=400, detail="tiktok_username is required.")
     item = DBMutedUser(owner_id=current_user.id, tiktok_user_id=payload.get("tiktok_user_id"), tiktok_username=username,
                        reason=str(payload.get("reason", "manual")), created_at=datetime.now(timezone.utc).replace(tzinfo=None))
-    db.add(item); db.commit(); db.refresh(item); return item
+    db.add(item)
+    await db.commit()
+    await db.refresh(item)
+    return item
 
 
 @router.delete("/v1/muted-users/{muted_id}")
-def unmute_user(muted_id: int, current_user: DBUser = Depends(get_current_user), db: Session = Depends(get_db)):
+async def unmute_user(muted_id: int, current_user: DBUser = Depends(get_current_user), db: AsyncSession = Depends(get_db)):
     from app.models import DBMutedUser
-    item = db.query(DBMutedUser).filter(DBMutedUser.id == muted_id, DBMutedUser.owner_id == current_user.id).first()
+    result = await db.execute(select(DBMutedUser).where(DBMutedUser.id == muted_id, DBMutedUser.owner_id == current_user.id))
+    item = result.scalar_one_or_none()
     if item is None: raise HTTPException(status_code=404, detail="Muted user not found.")
-    db.delete(item); db.commit(); return {"message": "User unmuted successfully."}
+    await db.delete(item)
+    await db.commit()
+    return {"message": "User unmuted successfully."}
