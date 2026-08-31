@@ -1,12 +1,14 @@
 import uuid
-from pathlib import Path
+from urllib.parse import urlparse
 
 from fastapi import APIRouter, Depends, File, HTTPException, UploadFile
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.config import settings
 from app.dependencies import get_current_user, get_db
 from app.models import DBGiftPreference, DBUser
+from app.r2_storage import R2StorageError, delete_gift_audio, upload_gift_audio
 from app.schemas import GiftAlertPreferenceSchema, GiftPreferenceResponse, TikTokGiftSchema
 from app.tiktok_manager import active_tiktok_clients
 
@@ -60,6 +62,16 @@ def _find_live_gift(user_id: int, gift_id: str):
     return next((gift for gift in gifts if gift.id == gift_id), None)
 
 
+def _is_owned_gift_audio_url(url: str | None, user_id: int) -> bool:
+    if not url:
+        return False
+    expected = urlparse(settings.R2_PUBLIC_BASE_URL.rstrip("/"))
+    parsed = urlparse(url)
+    if parsed.scheme != expected.scheme or parsed.netloc != expected.netloc:
+        return False
+    return parsed.path.lstrip("/").startswith(f"gift-alerts/{user_id}-")
+
+
 def _validate_alert_payload(payload: GiftAlertPreferenceSchema, user_id: int) -> None:
     if not payload.enabled:
         return
@@ -74,8 +86,7 @@ def _validate_alert_payload(payload: GiftAlertPreferenceSchema, user_id: int) ->
     elif payload.alert_type == "custom_audio":
         if not payload.custom_audio_url:
             raise HTTPException(status_code=422, detail="Custom audio gift alerts require custom_audio_url.")
-        prefix = f"/uploads/gift-alerts/{user_id}-"
-        if not payload.custom_audio_url.startswith(prefix):
+        if not _is_owned_gift_audio_url(payload.custom_audio_url, user_id):
             raise HTTPException(status_code=403, detail="Custom audio must belong to the current user.")
 
 
@@ -105,6 +116,7 @@ async def upsert_gift_preference(gift_id: str, payload: GiftAlertPreferenceSchem
     item = result.scalar_one_or_none()
     live_gift = _find_live_gift(current_user.id, gift_id)
     gift_name = live_gift.name if live_gift is not None else gift_id
+    old_audio_url = item.custom_audio_url if item is not None else None
     if item is None:
         item = DBGiftPreference(owner_id=current_user.id, gift_id=gift_id, gift_name=gift_name)
         db.add(item)
@@ -114,6 +126,11 @@ async def upsert_gift_preference(gift_id: str, payload: GiftAlertPreferenceSchem
         setattr(item, field, value)
     await db.commit()
     await db.refresh(item)
+    if old_audio_url and old_audio_url != item.custom_audio_url:
+        try:
+            await delete_gift_audio(old_audio_url)
+        except R2StorageError:
+            pass
     return _gift_to_schema(item)
 
 
@@ -125,8 +142,14 @@ async def delete_gift_preference(gift_id: str, current_user: DBUser = Depends(ge
     item = result.scalar_one_or_none()
     if item is None:
         raise HTTPException(status_code=404, detail="Gift preference not found.")
+    old_audio_url = item.custom_audio_url
     await db.delete(item)
     await db.commit()
+    if old_audio_url:
+        try:
+            await delete_gift_audio(old_audio_url)
+        except R2StorageError:
+            pass
     return {"message": "Gift-specific preference removed."}
 
 
@@ -134,25 +157,13 @@ async def delete_gift_preference(gift_id: str, current_user: DBUser = Depends(ge
 async def upload_gift_custom_audio(file: UploadFile = File(...), current_user: DBUser = Depends(get_current_user)):
     if current_user.plan.lower() != "pro":
         raise HTTPException(status_code=403, detail="Custom gift audio is available on the Pro plan.")
-    allowed = {"audio/mpeg", "audio/mp3", "audio/wav", "audio/x-wav", "audio/ogg", "audio/webm"}
-    if file.content_type not in allowed:
-        raise HTTPException(status_code=400, detail="Unsupported audio format. Use MP3, WAV, OGG, or WebM audio.")
-    upload_dir = Path("uploads/gift-alerts")
-    upload_dir.mkdir(parents=True, exist_ok=True)
-    suffix = Path(file.filename or "audio").suffix.lower() or ".audio"
-    filename = f"{current_user.id}-{uuid.uuid4().hex}{suffix}"
-    path = upload_dir / filename
-    size = 0
+    contents = await file.read()
+    await file.close()
+    if len(contents) > 10 * 1024 * 1024:
+        raise HTTPException(status_code=413, detail="Audio file must be 10 MB or smaller.")
     try:
-        with path.open("wb") as output:
-            while chunk := await file.read(1024 * 1024):
-                size += len(chunk)
-                if size > 10 * 1024 * 1024:
-                    raise HTTPException(status_code=413, detail="Audio file must be 10 MB or smaller.")
-                output.write(chunk)
-    except Exception:
-        path.unlink(missing_ok=True)
-        raise
-    finally:
-        await file.close()
-    return {"url": f"/uploads/gift-alerts/{filename}", "filename": filename, "size": size}
+        url = await upload_gift_audio(contents, current_user.id)
+    except R2StorageError as exc:
+        status_code = 400 if str(exc).startswith("Unsupported audio format") or str(exc) == "Audio file is empty." else 502
+        raise HTTPException(status_code=status_code, detail=str(exc)) from exc
+    return {"url": url, "size": len(contents)}
