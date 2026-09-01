@@ -56,9 +56,10 @@ class Settings(BaseSettings):
     FISH_AUDIO_DEFAULT_SAMPLE_RATE: int = 44100
     FISH_AUDIO_DEFAULT_BITRATE: int = 128
 
-    # Euler Stream gift catalog synchronization.
-    EULER_STREAM_BASE_URL: str = "https://tiktok.eulerstream.com"
-    EULER_STREAM_API_KEY: str = ""
+    # Dedicated Euler credential used only by the offline TikTok gift-catalog sync.
+    # This is intentionally separate from the existing TikTokLive/WSTTS connection.
+    EULER_GIFT_CATALOG_BASE_URL: str = "https://tiktok.eulerstream.com"
+    EULER_GIFT_CATALOG_API_KEY: str = ""
     GIFT_CATALOG_SYNC_INTERVAL_HOURS: int = 24
     GIFT_CATALOG_STALE_AFTER_HOURS: int = 48
 
