@@ -16,14 +16,17 @@ def verify_password(plain_password: str, hashed_password: str) -> bool:
     hashed_bytes = hashed_password.encode('utf-8')
     return bcrypt.checkpw(pwd_bytes, hashed_bytes)
 
-def create_access_token(user_id: int, token_version: int = 0) -> str:
+def create_session_id() -> str:
+    return secrets.token_urlsafe(32)
+
+def create_access_token(user_id: int, session_id: str) -> str:
     expire = datetime.now(timezone.utc) + timedelta(minutes=settings.ACCESS_TOKEN_EXPIRE_MINUTES)
-    to_encode = {"sub": str(user_id), "type": "access", "exp": expire, "token_version": token_version}
+    to_encode = {"sub": str(user_id), "type": "access", "exp": expire, "session_id": session_id}
     return jwt.encode(to_encode, settings.JWT_SECRET_KEY, algorithm=settings.ALGORITHM)
 
-def create_refresh_token(user_id: int, token_version: int = 0) -> tuple[str, datetime]:
+def create_refresh_token(user_id: int, session_id: str) -> tuple[str, datetime]:
     expires_at = datetime.now(timezone.utc) + timedelta(days=settings.REFRESH_TOKEN_EXPIRE_DAYS)
-    to_encode = {"sub": str(user_id), "type": "refresh", "exp": expires_at, "token_version": token_version}
+    to_encode = {"sub": str(user_id), "type": "refresh", "exp": expires_at, "session_id": session_id}
     token_string = jwt.encode(to_encode, settings.JWT_SECRET_KEY, algorithm=settings.ALGORITHM)
     return token_string, expires_at
 
