@@ -101,12 +101,15 @@ async def publish_live_event(user_id: int, item: dict[str, Any]) -> int:
     return await publish(event_channel(user_id), {"type": "tts_event", "item": item})
 
 
-async def request_stop(user_id: int) -> None:
+async def request_stop(user_id: int) -> str | None:
     owner = await get_redis().get(owner_key(user_id))
     if owner and owner != INSTANCE_ID:
         await publish(command_channel(owner), {"command": "stop", "user_id": user_id})
-    elif owner == INSTANCE_ID:
+        return owner
+    if owner == INSTANCE_ID:
         await publish(command_channel(INSTANCE_ID), {"command": "stop", "user_id": user_id})
+        return owner
+    return None
 
 
 async def acquire_tts_owner(user_id: int, ttl: int = 120) -> bool:
