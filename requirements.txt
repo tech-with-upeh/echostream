@@ -11,3 +11,4 @@ httpx
 alembic
 boto3
 python-magic
+redis>=5.0,<9
