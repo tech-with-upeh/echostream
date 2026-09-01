@@ -64,11 +64,6 @@ async def list_system_sounds(current_user: DBUser = Depends(get_current_user), d
 async def upload_system_sound(name: str = Form(...), file: UploadFile = File(...), current_admin: DBUser = Depends(require_admin), db: AsyncSession = Depends(get_db)):
     return await _upload_asset(file, name, None, db)
 
-@router.get("/v1/admin/sounds", response_model=list[AudioAssetResponse])
-async def list_admin_sounds(current_admin: DBUser = Depends(require_admin), db: AsyncSession = Depends(get_db)):
-    result = await db.execute(select(DBAudioAsset).where(DBAudioAsset.owner_user_id.is_(None)).order_by(DBAudioAsset.name.asc()))
-    return result.scalars().all()
-
 @router.delete("/v1/admin/sounds/{sound_id}")
 async def delete_system_sound(sound_id: int, current_admin: DBUser = Depends(require_admin), db: AsyncSession = Depends(get_db)):
     result = await db.execute(select(DBAudioAsset).where(DBAudioAsset.id == sound_id, DBAudioAsset.owner_user_id.is_(None)))
