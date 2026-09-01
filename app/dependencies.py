@@ -31,6 +31,11 @@ async def get_current_user(token: str = Depends(oauth2_scheme), db: AsyncSession
     db_user = result.scalar_one_or_none()
     if db_user is None:
         raise credentials_exception
+    token_version = payload.get("token_version", 0)
+    if token_version != db_user.token_version:
+        raise credentials_exception
+    if not db_user.is_active:
+        raise credentials_exception
     return db_user
 
 async def require_admin(current_user: DBUser = Depends(get_current_user)) -> DBUser:
