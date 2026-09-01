@@ -1,7 +1,7 @@
 """Add per-event alert preferences.
 
 Revision ID: 0003_event_alert_preferences
-Revises: 0002_audio_assets
+Revises: 8086d5910b34
 """
 
 from typing import Sequence, Union
@@ -10,7 +10,7 @@ from alembic import op
 import sqlalchemy as sa
 
 revision: str = "0003_event_alert_preferences"
-down_revision: Union[str, Sequence[str], None] = "0002_audio_assets"
+down_revision: Union[str, Sequence[str], None] = "8086d5910b34"
 branch_labels: Union[str, Sequence[str], None] = None
 depends_on: Union[str, Sequence[str], None] = None
 
