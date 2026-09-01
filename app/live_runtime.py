@@ -114,6 +114,11 @@ async def acquire_tts_owner(user_id: int, ttl: int = 120) -> bool:
     return bool(result)
 
 
+async def refresh_tts_owner(user_id: int, ttl: int = 120) -> bool:
+    result = await get_redis().eval(_REFRESH, 1, tts_owner_key(user_id), INSTANCE_ID, ttl)
+    return bool(result)
+
+
 async def release_tts_owner(user_id: int) -> None:
     await get_redis().eval(_RELEASE, 1, tts_owner_key(user_id), INSTANCE_ID)
 
