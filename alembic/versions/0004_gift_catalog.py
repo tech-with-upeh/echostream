@@ -39,6 +39,7 @@ def upgrade() -> None:
         sa.Column("last_successful_source", sa.String(), nullable=True),
         sa.Column("last_error", sa.Text(), nullable=True),
         sa.Column("catalog_version", sa.Integer(), nullable=False, server_default="0"),
+        sa.Column("catalog_hash", sa.String(), nullable=True),
     )
 
 
