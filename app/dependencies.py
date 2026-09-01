@@ -9,7 +9,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import settings
 from app.database import AsyncSessionLocal
-from app.models import DBUser
+from app.models import DBUser, DBUserSession
 
 oauth2_scheme = OAuth2PasswordBearer(tokenUrl="login")
 
@@ -17,24 +17,32 @@ async def get_db():
     async with AsyncSessionLocal() as db:
         yield db
 
-async def get_current_user(token: str = Depends(oauth2_scheme), db: AsyncSession = Depends(get_db)) -> DBUser:
+async def get_current_token_payload(token: str = Depends(oauth2_scheme)) -> dict:
     credentials_exception = HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Could not validate credentials", headers={"WWW-Authenticate": "Bearer"})
     try:
         payload = jwt.decode(token, settings.JWT_SECRET_KEY, algorithms=[settings.ALGORITHM])
-        user_id = payload.get("sub")
-        if user_id is None or payload.get("type") != "access":
+        if payload.get("type") != "access" or not payload.get("sub") or not payload.get("session_id"):
             raise credentials_exception
-        user_id = int(user_id)
+        int(payload["sub"])
     except (InvalidTokenError, ValueError, TypeError):
         raise credentials_exception
-    result = await db.execute(select(DBUser).where(DBUser.id == user_id))
+    return payload
+
+async def get_current_user(payload: dict = Depends(get_current_token_payload), db: AsyncSession = Depends(get_db)) -> DBUser:
+    credentials_exception = HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Could not validate credentials", headers={"WWW-Authenticate": "Bearer"})
+    user_id = int(payload["sub"])
+    session_id = payload["session_id"]
+    result = await db.execute(
+        select(DBUser)
+        .join(DBUserSession, DBUserSession.user_id == DBUser.id)
+        .where(
+            DBUser.id == user_id,
+            DBUserSession.id == session_id,
+            DBUserSession.revoked_at.is_(None),
+        )
+    )
     db_user = result.scalar_one_or_none()
-    if db_user is None:
-        raise credentials_exception
-    token_version = payload.get("token_version", 0)
-    if token_version != db_user.token_version:
-        raise credentials_exception
-    if not db_user.is_active:
+    if db_user is None or not db_user.is_active:
         raise credentials_exception
     return db_user
 
