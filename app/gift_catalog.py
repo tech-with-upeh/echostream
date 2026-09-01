@@ -6,7 +6,7 @@ from datetime import datetime, timedelta, timezone
 from typing import Any
 
 import httpx
-from sqlalchemy import select, text
+from sqlalchemy import select, text, update
 from sqlalchemy.dialects.postgresql import insert
 
 from app.config import settings
@@ -170,8 +170,9 @@ async def sync_gift_catalog() -> dict[str, Any]:
 
             incoming_ids = [gift["tiktok_gift_id"] for gift in gifts]
             await db.execute(
-                text("UPDATE tiktok_gifts SET is_active = false, updated_at = :now WHERE NOT (tiktok_gift_id = ANY(:ids))"),
-                {"now": now, "ids": incoming_ids},
+                update(DBTikTokGift)
+                .where(~DBTikTokGift.tiktok_gift_id.in_(incoming_ids))
+                .values(is_active=False, updated_at=now)
             )
 
             meta.last_successful_sync_at = now
