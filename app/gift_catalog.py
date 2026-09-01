@@ -83,10 +83,11 @@ def _fingerprint(gifts: list[dict[str, Any]]) -> str:
 
 
 async def _fetch_euler_catalog() -> list[dict[str, Any]]:
-    if not settings.EULER_STREAM_API_KEY:
-        raise RuntimeError("EULER_STREAM_API_KEY is not configured")
+    api_key = settings.EULER_GIFT_CATALOG_API_KEY.strip()
+    if not api_key:
+        raise RuntimeError("EULER_GIFT_CATALOG_API_KEY is not configured")
 
-    base = settings.EULER_STREAM_BASE_URL.rstrip("/")
+    base = settings.EULER_GIFT_CATALOG_BASE_URL.rstrip("/")
     timeout = httpx.Timeout(30.0, connect=10.0)
     all_gifts: list[dict[str, Any]] = []
     page = 1
@@ -97,7 +98,7 @@ async def _fetch_euler_catalog() -> list[dict[str, Any]]:
             response = await client.get(
                 f"{base}{_CATALOG_PATH}",
                 params={"pageSize": page_size, "pageNumber": page},
-                headers={"Accept": "application/json", "x-api-key": settings.EULER_STREAM_API_KEY},
+                headers={"Accept": "application/json", "X-Api-Key": api_key},
             )
             response.raise_for_status()
             payload = response.json()
