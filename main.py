@@ -3,22 +3,33 @@ from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
 
-from app.routers import auth, gifts, live, payments, prefrences, subscription_changes, voice, wstts, sounds
 from app.gift_catalog import gift_catalog_scheduler
+from app.live_runtime import command_listener, owner_heartbeat
+from app.rate_limit import RedisRateLimitMiddleware
+from app.redis_store import close_redis, ping_redis
+from app.routers import auth, gifts, live, payments, prefrences, subscription_changes, voice, wstts, sounds
 import app.models
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    await ping_redis()
     gift_sync_task = asyncio.create_task(gift_catalog_scheduler())
+    runtime_stop = asyncio.Event()
+    command_task = asyncio.create_task(command_listener(runtime_stop))
+    heartbeat_task = asyncio.create_task(owner_heartbeat(runtime_stop))
     try:
         yield
     finally:
-        gift_sync_task.cancel()
-        await asyncio.gather(gift_sync_task, return_exceptions=True)
+        runtime_stop.set()
+        for task in (command_task, heartbeat_task, gift_sync_task):
+            task.cancel()
+        await asyncio.gather(command_task, heartbeat_task, gift_sync_task, return_exceptions=True)
+        await close_redis()
 
 
 app = FastAPI(title="EchoStream Backend API", lifespan=lifespan)
+app.add_middleware(RedisRateLimitMiddleware)
 
 app.include_router(auth.router)
 app.include_router(voice.router)
