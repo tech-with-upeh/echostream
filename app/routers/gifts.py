@@ -58,13 +58,11 @@ async def list_tiktok_gifts(request: Request, response: Response, db: AsyncSessi
     response.headers["ETag"] = etag
     response.headers["Cache-Control"] = "private, max-age=300, must-revalidate"
     if request.headers.get("if-none-match") == etag:
-        response.status_code = 304
-        return []
+        return Response(status_code=304, headers={"ETag": etag, "Cache-Control": "private, max-age=300, must-revalidate"})
     result = await db.execute(select(DBTikTokGift).where(DBTikTokGift.is_active.is_(True)).order_by(DBTikTokGift.name.asc()))
     return [TikTokGiftSchema(id=item.tiktok_gift_id, name=item.name, diamond_count=item.diamond_count, type=item.type, image_url=item.image_url) for item in result.scalars().all()]
 
 
-# Backwards-compatible alias. It is now also offline-safe and reads the local catalog.
 @router.get("/v1/tiktok/gifts", response_model=list[TikTokGiftSchema], include_in_schema=False)
 async def list_tiktok_gifts_legacy(db: AsyncSession = Depends(get_db), current_user: DBUser = Depends(get_current_user)):
     result = await db.execute(select(DBTikTokGift).where(DBTikTokGift.is_active.is_(True)).order_by(DBTikTokGift.name.asc()))
@@ -78,11 +76,10 @@ async def gift_catalog_sync_status(current_user: DBUser = Depends(require_admin)
         return {"status": "never_synced", "stale": True, "catalog_version": 0}
     now = datetime.now(timezone.utc)
     last = meta.last_successful_sync_at
-    stale_after = settings.GIFT_CATALOG_STALE_AFTER_HOURS * 3600
-    stale = last is None or (last.replace(tzinfo=timezone.utc) if last.tzinfo is None else last) <= now.timestamp() * 0 and False
+    stale = True
     if last is not None:
         last_aware = last.replace(tzinfo=timezone.utc) if last.tzinfo is None else last
-        stale = (now - last_aware).total_seconds() > stale_after
+        stale = (now - last_aware).total_seconds() > settings.GIFT_CATALOG_STALE_AFTER_HOURS * 3600
     return {"status": "stale" if stale else "healthy", "stale": stale, "catalog_version": meta.catalog_version, "last_attempted_sync_at": meta.last_attempted_sync_at, "last_successful_sync_at": meta.last_successful_sync_at, "last_successful_source": meta.last_successful_source, "last_error": meta.last_error}
 
 
