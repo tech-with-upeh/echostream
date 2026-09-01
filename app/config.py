@@ -15,6 +15,19 @@ class Settings(BaseSettings):
     ACCESS_TOKEN_EXPIRE_MINUTES: int = 15
     REFRESH_TOKEN_EXPIRE_DAYS: int = 7
 
+    REDIS_URL: str = "redis://localhost:6379/0"
+    INSTANCE_ID: str = ""
+
+    RATE_LIMIT_ENABLED: bool = True
+    RATE_LIMIT_WINDOW_SECONDS: int = 60
+    RATE_LIMIT_PUBLIC_PER_MINUTE: int = 300
+    RATE_LIMIT_API_PER_MINUTE: int = 120
+    RATE_LIMIT_AUTH_PER_MINUTE: int = 10
+    RATE_LIMIT_TTS_PER_MINUTE: int = 30
+    RATE_LIMIT_CLONE_PER_MINUTE: int = 2
+    RATE_LIMIT_LIVE_START_PER_MINUTE: int = 5
+    RATE_LIMIT_WS_MESSAGES_PER_MINUTE: int = 120
+
     MAIL_USERNAME: str
     MAIL_PASSWORD: str
     MAIL_FROM: str
@@ -56,8 +69,6 @@ class Settings(BaseSettings):
     FISH_AUDIO_DEFAULT_SAMPLE_RATE: int = 44100
     FISH_AUDIO_DEFAULT_BITRATE: int = 128
 
-    # Dedicated Euler credential used only by the offline TikTok gift-catalog sync.
-    # This is intentionally separate from the existing TikTokLive/WSTTS connection.
     EULER_GIFT_CATALOG_BASE_URL: str = "https://tiktok.eulerstream.com"
     EULER_GIFT_CATALOG_API_KEY: str = ""
     GIFT_CATALOG_SYNC_INTERVAL_HOURS: int = 24
