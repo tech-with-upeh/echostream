@@ -36,25 +36,12 @@ class DBUserPreferences(Base):
 
 class DBTikTokGift(Base):
     __tablename__="tiktok_gifts"; __table_args__=(UniqueConstraint("tiktok_gift_id"),)
-    id=Column(Integer,primary_key=True,index=True)
-    tiktok_gift_id=Column(String,nullable=False,index=True)
-    name=Column(String,nullable=False)
-    diamond_count=Column(Integer,nullable=True)
-    type=Column(Integer,nullable=True)
-    image_url=Column(String,nullable=True)
-    is_active=Column(Boolean,nullable=False,default=True,index=True)
-    created_at=Column(UTCDateTime,nullable=False)
-    updated_at=Column(UTCDateTime,nullable=False)
+    id=Column(Integer,primary_key=True,index=True); tiktok_gift_id=Column(String,nullable=False,index=True); name=Column(String,nullable=False); diamond_count=Column(Integer,nullable=True); type=Column(Integer,nullable=True); image_url=Column(String,nullable=True); is_active=Column(Boolean,nullable=False,default=True,index=True); created_at=Column(UTCDateTime,nullable=False); updated_at=Column(UTCDateTime,nullable=False)
 
 
 class DBGiftCatalogSync(Base):
     __tablename__="gift_catalog_sync"
-    id=Column(Integer,primary_key=True)
-    last_attempted_sync_at=Column(UTCDateTime,nullable=True)
-    last_successful_sync_at=Column(UTCDateTime,nullable=True,index=True)
-    last_successful_source=Column(String,nullable=True)
-    last_error=Column(Text,nullable=True)
-    catalog_version=Column(Integer,nullable=False,default=0)
+    id=Column(Integer,primary_key=True); last_attempted_sync_at=Column(UTCDateTime,nullable=True); last_successful_sync_at=Column(UTCDateTime,nullable=True,index=True); last_successful_source=Column(String,nullable=True); last_error=Column(Text,nullable=True); catalog_version=Column(Integer,nullable=False,default=0); catalog_hash=Column(String,nullable=True)
 
 
 class DBGiftPreference(Base):
