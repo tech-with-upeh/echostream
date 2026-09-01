@@ -17,12 +17,7 @@ class RedisRateLimitMiddleware(BaseHTTPMiddleware):
         auth = request.headers.get("authorization", "")
         if auth.lower().startswith("bearer "):
             try:
-                payload = jwt.decode(
-                    auth[7:].strip(),
-                    settings.JWT_SECRET_KEY,
-                    algorithms=[settings.ALGORITHM],
-                    options={"verify_exp": False},
-                )
+                payload = jwt.decode(auth[7:].strip(), settings.JWT_SECRET_KEY, algorithms=[settings.ALGORITHM], options={"verify_exp": False})
                 if payload.get("sub"):
                     return f"user:{payload['sub']}"
             except Exception:
@@ -34,7 +29,12 @@ class RedisRateLimitMiddleware(BaseHTTPMiddleware):
         method = request.method.upper()
         if path in {"/docs", "/redoc", "/openapi.json", "/"} or method == "OPTIONS":
             return "skip", 0
-        if path in {"/login", "/register", "/forgot-password", "/reset-password", "/verify-email", "/resend-verification"}:
+        auth_paths = {
+            "/login", "/register", "/refresh", "/auth/google", "/logout",
+            "/forgot-password", "/reset-password", "/reset-pass-code",
+            "/verify-email", "/verify-email-code", "/resend-verification",
+        }
+        if path in auth_paths:
             return "auth", settings.RATE_LIMIT_AUTH_PER_MINUTE
         if path == "/v1/tts":
             return "tts", settings.RATE_LIMIT_TTS_PER_MINUTE
@@ -49,11 +49,9 @@ class RedisRateLimitMiddleware(BaseHTTPMiddleware):
     async def dispatch(self, request: Request, call_next: Callable):
         if not settings.RATE_LIMIT_ENABLED:
             return await call_next(request)
-
         category, limit = self._limit_for(request)
         if category == "skip":
             return await call_next(request)
-
         window = max(1, settings.RATE_LIMIT_WINDOW_SECONDS)
         bucket = int(time.time()) // window
         key = f"echostream:ratelimit:{category}:{self._identity(request)}:{bucket}"
@@ -63,12 +61,7 @@ class RedisRateLimitMiddleware(BaseHTTPMiddleware):
             await redis.expire(key, window + 1)
         if count > limit:
             retry_after = window - (int(time.time()) % window)
-            return JSONResponse(
-                status_code=429,
-                content={"detail": "Too many requests. Please try again later."},
-                headers={"Retry-After": str(retry_after)},
-            )
-
+            return JSONResponse(status_code=429, content={"detail": "Too many requests. Please try again later."}, headers={"Retry-After": str(retry_after)})
         response = await call_next(request)
         response.headers["X-RateLimit-Limit"] = str(limit)
         response.headers["X-RateLimit-Remaining"] = str(max(0, limit - count))
