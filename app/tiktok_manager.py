@@ -144,6 +144,15 @@ async def _gift_override(user_id: int, gift_id: str):
         return result.scalar_one_or_none()
 
 
+def _event_alert_config(prefs, event_type: str) -> dict | None:
+    try:
+        configured = json.loads(prefs.event_alerts or "{}")
+        value = configured.get(event_type)
+        return value if isinstance(value, dict) else None
+    except (TypeError, json.JSONDecodeError):
+        return None
+
+
 def _event_time(event) -> float | None:
     common = getattr(event, "common", None)
     raw = getattr(common, "create_time", None)
@@ -169,12 +178,63 @@ def _is_after_join_boundary(user_id: int, event) -> bool:
 
 
 async def _enqueue_event_tts(queue, prefs, msg_id, event_type, username, gift="", count=1):
-    if not prefs.event_speech_enabled:
+    config = _event_alert_config(prefs, event_type)
+    if config is None:
+        if not prefs.event_speech_enabled:
+            return
+        config = {
+            "enabled": True,
+            "alert_type": "tts",
+            "tts_template": prefs.event_speech_template,
+            "tts_provider": prefs.tts_provider or "edge",
+            "voice": prefs.voice,
+            "fish_voice_id": prefs.fish_voice_id,
+            "fish_model": prefs.fish_model,
+            "pitch": prefs.pitch,
+            "volume": prefs.volume,
+            "speed": prefs.speed,
+        }
+    if not config.get("enabled", True):
         return
-    text = _apply_template(prefs.event_speech_template, username, gift=gift, count=count, event_type=event_type)
-    if text.strip():
-        print(f"[tts][{event_type}] {text}")
-        await queue.put({"id": msg_id, "event_type": event_type, "alert_type": "tts", "text": text, "voice": prefs.voice, "provider": prefs.tts_provider or "edge", "fish_voice_id": prefs.fish_voice_id, "fish_model": prefs.fish_model, "pitch": prefs.pitch, "speed": max(0.1, min(4.0, prefs.speed / 100.0)), "volume": prefs.volume, "username": username, "gift": gift, "count": count})
+    alert_type = config.get("alert_type", "tts")
+    provider = config.get("tts_provider") or prefs.tts_provider or "edge"
+    voice = config.get("voice") or prefs.voice
+    fish_voice_id = config.get("fish_voice_id") or prefs.fish_voice_id
+    fish_model = config.get("fish_model") or prefs.fish_model
+    pitch = config.get("pitch") or prefs.pitch
+    volume = config.get("volume") if config.get("volume") is not None else prefs.volume
+    speed = config.get("speed") if config.get("speed") is not None else prefs.speed
+    item = {
+        "id": msg_id,
+        "event_type": event_type,
+        "alert_type": alert_type,
+        "text": "",
+        "provider": provider,
+        "voice": voice,
+        "fish_voice_id": fish_voice_id,
+        "fish_model": fish_model,
+        "pitch": pitch,
+        "speed": max(0.1, min(4.0, float(speed) / 100.0)),
+        "volume": volume,
+        "system_sound_id": config.get("system_sound_id"),
+        "custom_audio_url": config.get("custom_audio_url"),
+        "username": username,
+        "gift": gift,
+        "count": count,
+    }
+    if alert_type == "tts":
+        template = config.get("tts_template") or f"{{{{user}}}} {event_type}"
+        item["text"] = _apply_template(template, username, gift=gift, count=count, event_type=event_type)
+        if not item["text"].strip():
+            return
+        print(f"[tts][{event_type}] {item['text']}")
+    elif alert_type == "system_sound" and not item["system_sound_id"]:
+        return
+    elif alert_type == "custom_audio" and not item["custom_audio_url"]:
+        return
+    else:
+        return
+    await queue.put(item)
 
 
 async def _enqueue_gift_alert(queue, user_id, prefs, msg_id, username, gift_id, gift_name, count):
@@ -194,16 +254,32 @@ async def _enqueue_gift_alert(queue, user_id, prefs, msg_id, username, gift_id, 
         speed = override.speed if override.speed is not None else prefs.gift_speed
         pitch = override.pitch or prefs.pitch
     else:
-        if not prefs.gift_alert_enabled:
-            return
-        alert_type, template = prefs.gift_alert_type, prefs.gift_tts_template
-        provider = prefs.gift_tts_provider or prefs.tts_provider or "edge"
-        voice = prefs.gift_tts_voice or prefs.voice
-        fish_voice_id = prefs.gift_fish_voice_id or prefs.fish_voice_id
-        fish_model = prefs.gift_fish_model or prefs.fish_model
-        system_sound_id, custom_audio_url = prefs.gift_system_sound_id, prefs.gift_custom_audio_url
-        volume, speed, pitch = prefs.gift_volume, prefs.gift_speed, prefs.pitch
-    item = {"id": msg_id, "event_type": "gift", "alert_type": alert_type, "text": "", "provider": provider, "voice": voice, "fish_voice_id": fish_voice_id, "fish_model": fish_model, "pitch": pitch, "speed": max(0.1, min(4.0, speed / 100.0)), "volume": volume, "system_sound_id": system_sound_id, "custom_audio_url": custom_audio_url, "username": username, "gift_id": gift_id, "gift": gift_name, "count": count}
+        event_config = _event_alert_config(prefs, "gift")
+        if event_config is not None:
+            if not event_config.get("enabled", True):
+                return
+            alert_type = event_config.get("alert_type", "tts")
+            template = event_config.get("tts_template") or "{{user}} sent {{gift}}"
+            provider = event_config.get("tts_provider") or prefs.tts_provider or "edge"
+            voice = event_config.get("voice") or prefs.voice
+            fish_voice_id = event_config.get("fish_voice_id") or prefs.fish_voice_id
+            fish_model = event_config.get("fish_model") or prefs.fish_model
+            system_sound_id = event_config.get("system_sound_id")
+            custom_audio_url = event_config.get("custom_audio_url")
+            volume = event_config.get("volume") if event_config.get("volume") is not None else prefs.volume
+            speed = event_config.get("speed") if event_config.get("speed") is not None else prefs.speed
+            pitch = event_config.get("pitch") or prefs.pitch
+        else:
+            if not prefs.gift_alert_enabled:
+                return
+            alert_type, template = prefs.gift_alert_type, prefs.gift_tts_template
+            provider = prefs.gift_tts_provider or prefs.tts_provider or "edge"
+            voice = prefs.gift_tts_voice or prefs.voice
+            fish_voice_id = prefs.gift_fish_voice_id or prefs.fish_voice_id
+            fish_model = prefs.gift_fish_model or prefs.fish_model
+            system_sound_id, custom_audio_url = prefs.gift_system_sound_id, prefs.gift_custom_audio_url
+            volume, speed, pitch = prefs.gift_volume, prefs.gift_speed, prefs.pitch
+    item = {"id": msg_id, "event_type": "gift", "alert_type": alert_type, "text": "", "provider": provider, "voice": voice, "fish_voice_id": fish_voice_id, "fish_model": fish_model, "pitch": pitch, "speed": max(0.1, min(4.0, float(speed) / 100.0)), "volume": volume, "system_sound_id": system_sound_id, "custom_audio_url": custom_audio_url, "username": username, "gift_id": gift_id, "gift": gift_name, "count": count}
     if alert_type == "tts":
         item["text"] = _apply_template(template or "{{user}} sent {{gift}}", username, gift=gift_name, count=count, event_type="gift")
         if not item["text"].strip():
@@ -212,6 +288,8 @@ async def _enqueue_gift_alert(queue, user_id, prefs, msg_id, username, gift_id, 
     elif alert_type == "system_sound" and not system_sound_id:
         return
     elif alert_type == "custom_audio" and not custom_audio_url:
+        return
+    else:
         return
     await queue.put(item)
 
