@@ -10,8 +10,7 @@ class UserRegisterSchema(BaseModel):
 class UserLoginSchema(BaseModel):
     email: EmailStr
     password: str
-class UserForgotPasswordSchema(BaseModel):
-    email: EmailStr
+class UserForgotPasswordSchema(BaseModel): email: EmailStr
 class UserResetPasswordSchema(BaseModel):
     token: str
     email: EmailStr
@@ -31,17 +30,13 @@ class TokenResponse(BaseModel):
     access_token: str
     refresh_token: str
     token_type: str = "bearer"
-class RefreshRequestSchema(BaseModel):
-    refresh_token: str
-class ResendEmailSchema(BaseModel):
-    email: EmailStr
+class RefreshRequestSchema(BaseModel): refresh_token: str
+class ResendEmailSchema(BaseModel): email: EmailStr
 class VerifyEmailWithCodeSchema(BaseModel):
     email: EmailStr
     code: str
-class ResendVerificationSchema(BaseModel):
-    email: EmailStr
-class SocialAuthSchema(BaseModel):
-    id_token: str
+class ResendVerificationSchema(BaseModel): email: EmailStr
+class SocialAuthSchema(BaseModel): id_token: str
 class TTSTextPayloadSchema(BaseModel):
     text: str
     voice: str | None = None
@@ -90,20 +85,8 @@ class GiftPreferenceResponse(GiftAlertPreferenceSchema):
     gift_id: str
     gift_name: str
 class GenericGiftPreferenceSchema(GiftAlertPreferenceSchema): pass
-class EventAlertPreferenceSchema(BaseModel):
-    enabled: bool = True
-    alert_type: str = Field("tts", pattern="^(tts|system_sound|custom_audio)$")
+class EventAlertPreferenceSchema(GiftAlertPreferenceSchema):
     tts_template: str | None = "{{user}} {{event}}"
-    tts_provider: str | None = Field(None, pattern="^(edge|fish)$")
-    voice: str | None = None
-    fish_voice_id: str | None = None
-    fish_model: str | None = Field(None, pattern="^(s2-pro|s2\.1-pro-free)$")
-    system_sound_id: str | None = None
-    custom_audio_id: int | None = None
-    custom_audio_url: str | None = None
-    volume: int | None = Field(None, ge=0, le=100)
-    speed: int | None = Field(None, ge=50, le=200)
-    pitch: str | None = None
 class EventAlertPreferenceResponse(EventAlertPreferenceSchema):
     event_type: str
 class TikTokGiftSchema(BaseModel):
@@ -127,21 +110,7 @@ class PreferencesSchema(BaseModel):
     max_message_length: int = Field(100, ge=1, le=500)
     comment_speech_enabled: bool = False
     comment_speech_template: str = "{{user}} said {{comment}}"
-    event_speech_enabled: bool = False
-    event_speech_template: str = "{{user}} sent {{gift}}"
-    event_alerts: dict[str, EventAlertPreferenceSchema] = Field(default_factory=dict)
-    gift_alert_enabled: bool = False
-    gift_alert_type: str = Field("tts", pattern="^(tts|system_sound|custom_audio)$")
-    gift_tts_template: str = "{{user}} sent {{gift}}"
-    gift_tts_voice: str | None = None
-    gift_tts_provider: str | None = Field(None, pattern="^(edge|fish)$")
-    gift_fish_voice_id: str | None = None
-    gift_fish_model: str | None = None
-    gift_system_sound_id: str | None = None
-    gift_custom_audio_id: int | None = None
-    gift_custom_audio_url: str | None = None
-    gift_volume: int = Field(100, ge=0, le=100)
-    gift_speed: int = Field(100, ge=50, le=200)
+    events: dict[str, EventAlertPreferenceSchema] = Field(default_factory=dict)
     allowed_user_types: list[str] = Field(default_factory=lambda: ["all"])
     minimum_account_age_days: int = Field(1, ge=0, le=3650)
     blocked_words: list[str] = Field(default_factory=list)
