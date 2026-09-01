@@ -1,3 +1,4 @@
+import logging
 import time
 from typing import Callable
 
@@ -8,6 +9,8 @@ from starlette.middleware.base import BaseHTTPMiddleware
 
 from app.config import settings
 from app.redis_store import get_redis
+
+logger = logging.getLogger(__name__)
 
 
 class RedisRateLimitMiddleware(BaseHTTPMiddleware):
@@ -55,10 +58,20 @@ class RedisRateLimitMiddleware(BaseHTTPMiddleware):
         window = max(1, settings.RATE_LIMIT_WINDOW_SECONDS)
         bucket = int(time.time()) // window
         key = f"echostream:ratelimit:{category}:{self._identity(request)}:{bucket}"
-        redis = get_redis()
-        count = await redis.incr(key)
-        if count == 1:
-            await redis.expire(key, window + 1)
+
+        try:
+            redis = get_redis()
+            count = await redis.incr(key)
+            if count == 1:
+                await redis.expire(key, window + 1)
+        except Exception:
+            # Rate limiting is a protective feature, not a hard dependency for the API.
+            logger.warning(
+                "Redis rate limiter unavailable; allowing request through",
+                exc_info=True,
+            )
+            return await call_next(request)
+
         if count > limit:
             retry_after = window - (int(time.time()) % window)
             return JSONResponse(status_code=429, content={"detail": "Too many requests. Please try again later."}, headers={"Retry-After": str(retry_after)})
