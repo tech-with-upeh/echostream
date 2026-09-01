@@ -90,6 +90,8 @@ async def _enqueue_event(queue,prefs,msg_id,event_type,username,gift="",count=1,
         if not item["custom_audio_url"]:return
     else:return
     print(f"[event][{event_type}] alert={alert_type} user={username} count={count}")
+    if item["text"]:
+        print("tstssss:::  ", item["text"])
     await queue.put(item)
 
 def _event_time(event):
@@ -121,12 +123,14 @@ async def start_tiktok_session(user_id,tiktok_username):
         _warmup_tasks[user_id]=asyncio.create_task(finish()); print(f"[live] connected user_id={user_id}")
     @client.on(CommentEvent)
     async def on_comment(event):
+        print("recv: coment")
         queue=active_sessions.get(user_id)
         if queue is None or not getattr(queue,"ready",False) or not _is_after_join_boundary(user_id,event):return
         _,prefs=await _load_user_and_preferences(user_id)
         if prefs is None or not prefs.comment_speech_enabled:return
         username=(getattr(event.user,"nickname",None) or getattr(event.user,"unique_id",None) or "someone") if event.user else "someone"; tid=str(getattr(event.user,"user_id",None) or "") or None; comment=(getattr(event,"comment","") or "").strip()
         if not comment or await _muted(user_id,tid,username) or not _allowed_user(event,prefs):return
+        print("comments", comment)
         if prefs.require_command_prefix:
             if not comment.startswith("!"):return
             comment=comment[1:].lstrip()
