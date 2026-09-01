@@ -29,7 +29,6 @@ class DBUser(Base):
 class DBAudioAsset(Base):
     __tablename__ = "audio_assets"
     __table_args__ = (UniqueConstraint("r2_key"),)
-
     id = Column(Integer, primary_key=True, index=True)
     name = Column(String, nullable=False)
     r2_key = Column(String, nullable=False, index=True)
@@ -64,12 +63,7 @@ class DBResetPassVerificationCode(Base):
 
 class DBSubscription(Base):
     __tablename__ = "subscriptions"
-    __table_args__ = (
-        UniqueConstraint("user_id"),
-        UniqueConstraint("paystack_subscription_code"),
-        UniqueConstraint("reference"),
-    )
-
+    __table_args__ = (UniqueConstraint("user_id"), UniqueConstraint("paystack_subscription_code"), UniqueConstraint("reference"))
     id = Column(Integer, primary_key=True, index=True)
     user_id = Column(Integer, ForeignKey("users.id", ondelete="CASCADE"), nullable=False)
     plan = Column(String, nullable=False)
@@ -108,6 +102,7 @@ class DBUserPreferences(Base):
     comment_speech_template = Column(String, nullable=False, default="{{user}} said {{comment}}")
     event_speech_enabled = Column(Boolean, nullable=False, default=False)
     event_speech_template = Column(String, nullable=False, default="{{user}} sent {{event}}")
+    event_alerts = Column(Text, nullable=False, default="{}")
     gift_alert_enabled = Column(Boolean, nullable=False, default=False)
     gift_alert_type = Column(String, nullable=False, default="tts")
     gift_tts_template = Column(String, nullable=False, default="{{user}} sent {{gift}}")
