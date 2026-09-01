@@ -14,7 +14,6 @@ from app.database import AsyncSessionLocal
 from app.models import DBGiftCatalogSync, DBTikTokGift
 
 logger = logging.getLogger(__name__)
-
 _LOCK_KEY = 84639217
 _CATALOG_PATH = "/webcast/gifts/catalog"
 
@@ -31,6 +30,13 @@ def _value(item: dict[str, Any], *keys: str) -> Any:
     return None
 
 
+def _as_int(value: Any) -> int | None:
+    try:
+        return int(value) if value is not None else None
+    except (TypeError, ValueError):
+        return None
+
+
 def _image_url(item: dict[str, Any]) -> str | None:
     value = _value(item, "image_url", "imageUrl", "icon_url", "iconUrl")
     if isinstance(value, str):
@@ -41,7 +47,6 @@ def _image_url(item: dict[str, Any]) -> str | None:
 
 
 def _extract_gifts(payload: dict[str, Any]) -> tuple[list[dict[str, Any]], int | None, int | None]:
-    # Euler documents {gifts, total, pageSize, pageNumber, totalPages}.
     gifts = payload.get("gifts")
     if gifts is None and isinstance(payload.get("data"), dict):
         gifts = payload["data"].get("gifts")
@@ -56,13 +61,6 @@ def _extract_gifts(payload: dict[str, Any]) -> tuple[list[dict[str, Any]], int |
         total_pages = total_pages or _value(payload["data"], "totalPages", "total_pages")
         page_size = page_size or _value(payload["data"], "pageSize", "page_size")
     return [g for g in gifts if isinstance(g, dict)], _as_int(total_pages), _as_int(page_size)
-
-
-def _as_int(value: Any) -> int | None:
-    try:
-        return int(value) if value is not None else None
-    except (TypeError, ValueError):
-        return None
 
 
 def _normalize(raw: dict[str, Any]) -> dict[str, Any]:
@@ -98,14 +96,13 @@ async def _fetch_euler_catalog() -> list[dict[str, Any]]:
         while True:
             response = await client.get(
                 f"{base}{_CATALOG_PATH}",
-                params={"pageSize": page_size, "pageNumber": page, "apiKey": settings.EULER_STREAM_API_KEY},
-                headers={"Accept": "application/json"},
+                params={"pageSize": page_size, "pageNumber": page},
+                headers={"Accept": "application/json", "x-api-key": settings.EULER_STREAM_API_KEY},
             )
             response.raise_for_status()
             payload = response.json()
             raw_gifts, total_pages, returned_page_size = _extract_gifts(payload)
-            normalized = [_normalize(gift) for gift in raw_gifts]
-            all_gifts.extend(normalized)
+            all_gifts.extend(_normalize(gift) for gift in raw_gifts)
 
             if not raw_gifts:
                 break
@@ -125,13 +122,7 @@ async def _fetch_euler_catalog() -> list[dict[str, Any]]:
 
 
 async def sync_gift_catalog() -> dict[str, Any]:
-    """Synchronize the complete Euler catalog atomically.
-
-    The PostgreSQL advisory lock prevents multiple app replicas from syncing at
-    the same time. External fetching happens while the lock is held so another
-    replica cannot start a competing catalog run. The existing catalog is not
-    changed unless every page is fetched, parsed, and validated successfully.
-    """
+    """Fetch the complete Euler catalog and apply it atomically."""
     async with AsyncSessionLocal() as db:
         acquired = (await db.execute(text("SELECT pg_try_advisory_lock(:key)"), {"key": _LOCK_KEY})).scalar_one()
         if not acquired:
@@ -143,6 +134,7 @@ async def sync_gift_catalog() -> dict[str, Any]:
             if meta is None:
                 meta = DBGiftCatalogSync(id=1, catalog_version=0)
                 db.add(meta)
+                await db.flush()
             meta.last_attempted_sync_at = now
             meta.last_error = None
             await db.commit()
@@ -161,40 +153,38 @@ async def sync_gift_catalog() -> dict[str, Any]:
                 logger.exception("TikTok gift catalog sync failed")
                 return {"status": "failed", "error": str(exc)}
 
-            # Build the new catalog in memory first. No DB row is changed until
-            # all pages have completed successfully.
+            catalog_hash = _fingerprint(gifts)
+            meta = (await db.execute(select(DBGiftCatalogSync).where(DBGiftCatalogSync.id == 1))).scalar_one()
+            changed = meta.catalog_hash != catalog_hash
+
+            # No catalog rows are changed until every page has been fetched and validated.
             for gift in gifts:
-                stmt = insert(DBTikTokGift).values(
-                    **gift,
-                    is_active=True,
-                    created_at=now,
-                    updated_at=now,
-                ).on_conflict_do_update(
+                stmt = insert(DBTikTokGift).values(**gift, is_active=True, created_at=now, updated_at=now).on_conflict_do_update(
                     index_elements=[DBTikTokGift.tiktok_gift_id],
                     set_={
-                        "name": gift["name"],
-                        "diamond_count": gift["diamond_count"],
-                        "type": gift["type"],
-                        "image_url": gift["image_url"],
-                        "is_active": True,
-                        "updated_at": now,
+                        "name": gift["name"], "diamond_count": gift["diamond_count"], "type": gift["type"],
+                        "image_url": gift["image_url"], "is_active": True, "updated_at": now,
                     },
                 )
                 await db.execute(stmt)
 
             incoming_ids = [gift["tiktok_gift_id"] for gift in gifts]
             await db.execute(
-                text("UPDATE tiktok_gifts SET is_active = false, updated_at = :now WHERE tiktok_gift_id <> ALL(:ids)"),
+                text("UPDATE tiktok_gifts SET is_active = false, updated_at = :now WHERE NOT (tiktok_gift_id = ANY(:ids))"),
                 {"now": now, "ids": incoming_ids},
             )
 
-            meta = (await db.execute(select(DBGiftCatalogSync).where(DBGiftCatalogSync.id == 1))).scalar_one()
             meta.last_successful_sync_at = now
             meta.last_successful_source = "euler"
             meta.last_error = None
-            meta.catalog_version = int(meta.catalog_version or 0) + 1
+            meta.catalog_hash = catalog_hash
+            if changed:
+                meta.catalog_version = int(meta.catalog_version or 0) + 1
             await db.commit()
-            return {"status": "success", "count": len(gifts), "version": meta.catalog_version}
+            return {"status": "success", "count": len(gifts), "changed": changed, "version": meta.catalog_version}
+        except Exception:
+            await db.rollback()
+            raise
         finally:
             await db.execute(text("SELECT pg_advisory_unlock(:key)"), {"key": _LOCK_KEY})
             await db.commit()
@@ -205,13 +195,14 @@ async def gift_catalog_scheduler() -> None:
     while True:
         try:
             async with AsyncSessionLocal() as db:
-                count = (await db.execute(select(DBTikTokGift.id).limit(1))).first()
-            if count is None:
+                exists = (await db.execute(select(DBTikTokGift.id).limit(1))).first()
+            if exists is None:
                 await sync_gift_catalog()
             else:
                 async with AsyncSessionLocal() as db:
                     meta = (await db.execute(select(DBGiftCatalogSync).where(DBGiftCatalogSync.id == 1))).scalar_one_or_none()
-                if meta is None or meta.last_successful_sync_at is None or meta.last_successful_sync_at <= _utcnow() - timedelta(seconds=interval):
+                last = meta.last_successful_sync_at if meta else None
+                if last is None or last <= _utcnow() - timedelta(seconds=interval):
                     await sync_gift_catalog()
         except asyncio.CancelledError:
             raise
