@@ -11,7 +11,7 @@ from TikTokLive import TikTokLiveClient
 from TikTokLive.events import ConnectEvent, CommentEvent, DisconnectEvent, FollowEvent, GiftEvent, LikeEvent
 
 from app.database import AsyncSessionLocal
-from app.live_runtime import INSTANCE_ID, mark_live_failed, mark_live_ready, publish_live_event, release_live_owner
+from app.live_runtime import INSTANCE_ID, mark_live_failed, mark_live_ready, publish_live_event, release_live_owner, set_live_state
 from app.models import DBGiftPreference, DBMutedUser, DBUser, DBUserPreferences
 
 active_tiktok_clients: dict[int, TikTokLiveClient] = {}
@@ -46,16 +46,6 @@ def _normalise_words(value):
 
 def _contains_blocked_word(text, words):
     return any(re.search(rf"(?<!\w){re.escape(word)}(?!\w)", text.lower()) for word in words)
-
-
-def _contains_repeated_words(text, minimum=3):
-    words = re.findall(r"[\w']+", text.lower())
-    run = 1
-    for a, b in zip(words, words[1:]):
-        run = run + 1 if a == b else 1
-        if run >= minimum:
-            return True
-    return False
 
 
 def _user_role(event):
@@ -138,22 +128,11 @@ async def _enqueue_event(prefs, msg_id, event_type, username, gift="", count=1, 
     volume = config.get("volume") if config.get("volume") is not None else prefs.volume
     speed = config.get("speed") if config.get("speed") is not None else prefs.speed
     item = {
-        "id": msg_id,
-        "event_type": event_type,
-        "alert_type": alert_type,
-        "text": "",
-        "provider": provider,
-        "voice": voice,
-        "fish_voice_id": fish_voice_id,
-        "fish_model": fish_model,
-        "pitch": pitch,
-        "speed": max(.1, min(4.0, float(speed) / 100)),
-        "volume": volume,
-        "system_sound_id": config.get("system_sound_id"),
-        "custom_audio_url": config.get("custom_audio_url"),
-        "username": username,
-        "gift": gift,
-        "count": count,
+        "id": msg_id, "event_type": event_type, "alert_type": alert_type, "text": "", "provider": provider,
+        "voice": voice, "fish_voice_id": fish_voice_id, "fish_model": fish_model, "pitch": pitch,
+        "speed": max(.1, min(4.0, float(speed) / 100)), "volume": volume,
+        "system_sound_id": config.get("system_sound_id"), "custom_audio_url": config.get("custom_audio_url"),
+        "username": username, "gift": gift, "count": count,
     }
     if alert_type == "tts":
         template = config.get("tts_template") or ("{{user}} sent {{gift}}" if event_type == "gift" else f"{{{{user}}}} {event_type}")
@@ -247,18 +226,11 @@ async def start_tiktok_session(user_id, tiktok_username):
                 await _auto_mute(user_id, tid, username)
             return
         item = {
-            "id": f"comment-{time.time_ns()}",
-            "event_type": "comment",
-            "alert_type": "tts",
+            "id": f"comment-{time.time_ns()}", "event_type": "comment", "alert_type": "tts",
             "text": _apply_template(prefs.comment_speech_template, username, comment=comment),
-            "provider": prefs.tts_provider,
-            "voice": prefs.voice,
-            "fish_voice_id": prefs.fish_voice_id,
-            "fish_model": prefs.fish_model,
-            "pitch": prefs.pitch,
-            "speed": float(prefs.speed) / 100,
-            "volume": prefs.volume,
-            "username": username,
+            "provider": prefs.tts_provider, "voice": prefs.voice, "fish_voice_id": prefs.fish_voice_id,
+            "fish_model": prefs.fish_model, "pitch": prefs.pitch, "speed": float(prefs.speed) / 100,
+            "volume": prefs.volume, "username": username,
         }
         if item["text"].strip():
             await publish_live_event(user_id, item)
@@ -306,18 +278,11 @@ async def start_tiktok_session(user_id, tiktok_username):
             if not override.enabled:
                 return
             override_data = {
-                "enabled": True,
-                "alert_type": override.alert_type,
-                "tts_template": override.tts_template,
-                "tts_provider": override.tts_provider,
-                "voice": override.voice,
-                "fish_voice_id": override.fish_voice_id,
-                "fish_model": override.fish_model,
-                "system_sound_id": override.system_sound_id,
-                "custom_audio_url": override.custom_audio_url,
-                "volume": override.volume,
-                "speed": override.speed,
-                "pitch": override.pitch,
+                "enabled": True, "alert_type": override.alert_type, "tts_template": override.tts_template,
+                "tts_provider": override.tts_provider, "voice": override.voice, "fish_voice_id": override.fish_voice_id,
+                "fish_model": override.fish_model, "system_sound_id": override.system_sound_id,
+                "custom_audio_url": override.custom_audio_url, "volume": override.volume,
+                "speed": override.speed, "pitch": override.pitch,
             }
         await _enqueue_event(prefs, f"gift-{time.time_ns()}", "gift", username, gift=gift_name, count=count, override=override_data)
 
@@ -352,6 +317,7 @@ async def stop_tiktok_session(user_id):
     client = active_tiktok_clients.pop(user_id, None)
     if client is not None:
         await client.disconnect()
+    await set_live_state(user_id, "stopped")
     await release_live_owner(user_id)
     for key in [k for k in _request_times if k[0] == user_id]:
         _request_times.pop(key, None)
