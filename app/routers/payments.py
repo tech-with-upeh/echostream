@@ -111,20 +111,22 @@ async def find_subscription_for_event(
 ):
     if subscription_code:
         result = await db.execute(
-            select(DBSubscription).where(
-                DBSubscription.paystack_subscription_code == subscription_code
-            )
+            select(DBSubscription)
+            .where(DBSubscription.paystack_subscription_code == subscription_code)
+            .with_for_update()
         )
         subscription = result.scalar_one_or_none()
         if subscription:
             return subscription, False
 
         result = await db.execute(
-            select(DBSubscription).where(
+            select(DBSubscription)
+            .where(
                 DBSubscription.metadata_json.like(
                     f'%"pending_subscription_code": "{subscription_code}"%'
                 )
             )
+            .with_for_update()
         )
         subscription = result.scalars().first()
         if subscription:
@@ -135,7 +137,9 @@ async def find_subscription_for_event(
     if user_id:
         try:
             result = await db.execute(
-                select(DBSubscription).where(DBSubscription.user_id == int(user_id))
+                select(DBSubscription)
+                .where(DBSubscription.user_id == int(user_id))
+                .with_for_update()
             )
             subscription = result.scalar_one_or_none()
             if subscription:
@@ -144,7 +148,6 @@ async def find_subscription_for_event(
             pass
 
     return None, False
-
 
 async def finalize_pending_change(
     db: AsyncSession,

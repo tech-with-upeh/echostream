@@ -5,7 +5,7 @@ from fastapi import APIRouter, Depends, HTTPException, status, BackgroundTasks
 import jwt
 import secrets
 from jwt.exceptions import InvalidTokenError
-from sqlalchemy import select, delete
+from sqlalchemy import select, delete, update
 from sqlalchemy.ext.asyncio import AsyncSession
 from app.dependencies import get_db, get_current_user, get_current_token_payload
 from app.models import DBUser, DBUserSession, DBRefreshToken, DBEmailVerificationCode, DBResetPassVerificationCode
@@ -243,6 +243,11 @@ async def reset_pass_with_code(reset_data: UserResetPasswordSchema, db: AsyncSes
     if not db_user:
         raise HTTPException(status_code=404, detail="User profile not found.")
     db_user.hashed_password = await _hash_password(reset_data.password)
+    await db.execute(
+        update(DBUserSession)
+        .where(DBUserSession.user_id == db_user.id, DBUserSession.revoked_at.is_(None))
+        .values(revoked_at=datetime.now(timezone.utc))
+    )
     access_token, refresh_token_str = await _issue_session_tokens(db, db_user.id)
     await db.execute(delete(DBResetPassVerificationCode).where(DBResetPassVerificationCode.email == db_user.email))
     await db.commit()
@@ -295,6 +300,11 @@ async def reset_pass(reset_data: UserResetPasswordSchema, db: AsyncSession = Dep
     if not db_user:
         raise HTTPException(status_code=404, detail="User not found")
     db_user.hashed_password = await _hash_password(reset_data.password)
+    await db.execute(
+        update(DBUserSession)
+        .where(DBUserSession.user_id == db_user.id, DBUserSession.revoked_at.is_(None))
+        .values(revoked_at=datetime.now(timezone.utc))
+    )
     access_token, refresh_token_str = await _issue_session_tokens(db, db_user.id)
     await db.execute(delete(DBResetPassVerificationCode).where(DBResetPassVerificationCode.email == db_user.email))
     await db.commit()
