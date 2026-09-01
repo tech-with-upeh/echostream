@@ -90,6 +90,22 @@ class GiftPreferenceResponse(GiftAlertPreferenceSchema):
     gift_id: str
     gift_name: str
 class GenericGiftPreferenceSchema(GiftAlertPreferenceSchema): pass
+class EventAlertPreferenceSchema(BaseModel):
+    enabled: bool = True
+    alert_type: str = Field("tts", pattern="^(tts|system_sound|custom_audio)$")
+    tts_template: str | None = "{{user}} {{event}}"
+    tts_provider: str | None = Field(None, pattern="^(edge|fish)$")
+    voice: str | None = None
+    fish_voice_id: str | None = None
+    fish_model: str | None = Field(None, pattern="^(s2-pro|s2\.1-pro-free)$")
+    system_sound_id: str | None = None
+    custom_audio_id: int | None = None
+    custom_audio_url: str | None = None
+    volume: int | None = Field(None, ge=0, le=100)
+    speed: int | None = Field(None, ge=50, le=200)
+    pitch: str | None = None
+class EventAlertPreferenceResponse(EventAlertPreferenceSchema):
+    event_type: str
 class TikTokGiftSchema(BaseModel):
     id: str
     name: str
@@ -113,6 +129,7 @@ class PreferencesSchema(BaseModel):
     comment_speech_template: str = "{{user}} said {{comment}}"
     event_speech_enabled: bool = False
     event_speech_template: str = "{{user}} sent {{gift}}"
+    event_alerts: dict[str, EventAlertPreferenceSchema] = Field(default_factory=dict)
     gift_alert_enabled: bool = False
     gift_alert_type: str = Field("tts", pattern="^(tts|system_sound|custom_audio)$")
     gift_tts_template: str = "{{user}} sent {{gift}}"
