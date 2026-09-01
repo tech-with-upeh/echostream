@@ -7,11 +7,11 @@ import secrets
 from jwt.exceptions import InvalidTokenError
 from sqlalchemy import select, delete
 from sqlalchemy.ext.asyncio import AsyncSession
-from app.dependencies import get_db, get_current_user
-from app.models import DBUser, DBRefreshToken, DBEmailVerificationCode, DBResetPassVerificationCode
+from app.dependencies import get_db, get_current_user, get_current_token_payload
+from app.models import DBUser, DBUserSession, DBRefreshToken, DBEmailVerificationCode, DBResetPassVerificationCode
 from app.schemas import UserRegisterSchema, UserResetPasswordSchema, UserForgotPasswordSchema, UserLoginSchema, UserResponse, TokenResponse, RefreshRequestSchema, VerifyEmailWithCodeSchema, ResendVerificationSchema, SocialAuthSchema
 from app.config import settings
-from app.security import get_password_hash, verify_password, create_access_token, create_refresh_token, create_verification_token, generate_numeric_otp
+from app.security import get_password_hash, verify_password, create_session_id, create_access_token, create_refresh_token, create_verification_token, generate_numeric_otp
 from app.email_service import send_combined_verification_email, send_combined_reset_pass_email
 from google.oauth2 import id_token as google_id_token
 from google.auth.transport import requests as google_requests
@@ -34,6 +34,26 @@ async def _hash_password(password: str) -> str:
 
 async def _verify_password(password: str, hashed_password: str) -> bool:
     return await asyncio.to_thread(verify_password, password, hashed_password)
+
+
+async def _issue_session_tokens(db: AsyncSession, user_id: int) -> tuple[str, str]:
+    now_utc = datetime.now(timezone.utc)
+    session_id = create_session_id()
+    db.add(DBUserSession(
+        id=session_id,
+        user_id=user_id,
+        created_at=now_utc,
+        last_used_at=now_utc,
+    ))
+    access_token = create_access_token(user_id=user_id, session_id=session_id)
+    refresh_token_str, expires_at = create_refresh_token(user_id=user_id, session_id=session_id)
+    db.add(DBRefreshToken(
+        token=refresh_token_str,
+        user_id=user_id,
+        session_id=session_id,
+        expires_at=expires_at,
+    ))
+    return access_token, refresh_token_str
 
 
 @router.post("/auth/google", response_model=TokenResponse)
@@ -69,9 +89,7 @@ async def google_auth(payload: SocialAuthSchema, db: AsyncSession = Depends(get_
         await db.commit()
         await db.refresh(db_user)
 
-    access_token = create_access_token(user_id=db_user.id, token_version=db_user.token_version)
-    refresh_token_str, expires_at = create_refresh_token(user_id=db_user.id, token_version=db_user.token_version)
-    db.add(DBRefreshToken(token=refresh_token_str, user_id=db_user.id, expires_at=expires_at))
+    access_token, refresh_token_str = await _issue_session_tokens(db, db_user.id)
     await db.commit()
     return {"access_token": access_token, "refresh_token": refresh_token_str}
 
@@ -84,9 +102,7 @@ async def login(login_data: UserLoginSchema, db: AsyncSession = Depends(get_db))
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Incorrect email or password")
     if not db_user.is_verified:
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Your email address has not been verified. Please check your inbox.")
-    access_token = create_access_token(user_id=db_user.id, token_version=db_user.token_version)
-    refresh_token_str, expires_at = create_refresh_token(user_id=db_user.id, token_version=db_user.token_version)
-    db.add(DBRefreshToken(token=refresh_token_str, user_id=db_user.id, expires_at=expires_at))
+    access_token, refresh_token_str = await _issue_session_tokens(db, db_user.id)
     await db.commit()
     return {"access_token": access_token, "refresh_token": refresh_token_str}
 
@@ -97,7 +113,8 @@ async def refresh_session(payload: RefreshRequestSchema, db: AsyncSession = Depe
     db_token = result.scalar_one_or_none()
     if not db_token:
         raise HTTPException(status_code=401, detail="Invalid refresh token")
-    if db_token.expires_at.replace(tzinfo=timezone.utc) < datetime.now(timezone.utc):
+    now_utc = datetime.now(timezone.utc)
+    if db_token.expires_at.replace(tzinfo=timezone.utc) < now_utc:
         await db.delete(db_token)
         await db.commit()
         raise HTTPException(status_code=401, detail="Refresh token expired, please log in again")
@@ -105,29 +122,54 @@ async def refresh_session(payload: RefreshRequestSchema, db: AsyncSession = Depe
         jwt_payload = jwt.decode(payload.refresh_token, settings.JWT_SECRET_KEY, algorithms=[settings.ALGORITHM])
         if jwt_payload.get("type") != "refresh":
             raise HTTPException(status_code=401, detail="Invalid token scope")
-        if jwt_payload.get("token_version", 0) != db_token.user.token_version:
-            raise HTTPException(status_code=401, detail="Refresh token has been revoked")
+        if jwt_payload.get("sub") != str(db_token.user_id):
+            raise HTTPException(status_code=401, detail="Invalid refresh token")
+        if jwt_payload.get("session_id") != db_token.session_id:
+            raise HTTPException(status_code=401, detail="Invalid refresh token session")
     except InvalidTokenError:
         await db.delete(db_token)
         await db.commit()
         raise HTTPException(status_code=401, detail="Invalid or altered refresh token")
-    user_id = db_token.user_id
-    token_version = db_token.user.token_version
-    await db.delete(db_token)
-    await db.commit()
-    new_access_token = create_access_token(user_id=user_id, token_version=token_version)
-    new_refresh_str, new_expiry = create_refresh_token(user_id=user_id, token_version=token_version)
-    db.add(DBRefreshToken(token=new_refresh_str, user_id=user_id, expires_at=new_expiry))
+
+    session_result = await db.execute(select(DBUserSession).where(
+        DBUserSession.id == db_token.session_id,
+        DBUserSession.user_id == db_token.user_id,
+        DBUserSession.revoked_at.is_(None),
+    ))
+    session = session_result.scalar_one_or_none()
+    if session is None:
+        await db.delete(db_token)
+        await db.commit()
+        raise HTTPException(status_code=401, detail="Session has been revoked")
+
+    session.last_used_at = now_utc
+    new_access_token = create_access_token(user_id=db_token.user_id, session_id=db_token.session_id)
+    new_refresh_str, new_expiry = create_refresh_token(user_id=db_token.user_id, session_id=db_token.session_id)
+    db_token.token = new_refresh_str
+    db_token.expires_at = new_expiry
     await db.commit()
     return {"access_token": new_access_token, "refresh_token": new_refresh_str}
 
 
 @router.post("/logout")
-async def logout(current_user: DBUser = Depends(get_current_user), db: AsyncSession = Depends(get_db)):
-    current_user.token_version += 1
-    await db.execute(delete(DBRefreshToken).where(DBRefreshToken.user_id == current_user.id))
+async def logout(
+    token_payload: dict = Depends(get_current_token_payload),
+    db: AsyncSession = Depends(get_db),
+):
+    session_id = token_payload["session_id"]
+    user_id = int(token_payload["sub"])
+    result = await db.execute(select(DBUserSession).where(
+        DBUserSession.id == session_id,
+        DBUserSession.user_id == user_id,
+        DBUserSession.revoked_at.is_(None),
+    ))
+    session = result.scalar_one_or_none()
+    if session is None:
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Session has already been revoked")
+    session.revoked_at = datetime.now(timezone.utc)
+    await db.execute(delete(DBRefreshToken).where(DBRefreshToken.session_id == session_id))
     await db.commit()
-    return {"status": "success", "message": "Logged out successfully. All active sessions have been revoked."}
+    return {"status": "success", "message": "Logged out successfully."}
 
 
 @router.post("/register", response_model=UserResponse)
@@ -181,9 +223,7 @@ async def verify_email_with_code(payload: VerifyEmailWithCodeSchema, db: AsyncSe
     db_user.is_verified = True
     await db.delete(db_record)
     await db.commit()
-    access_token = create_access_token(user_id=db_user.id, token_version=db_user.token_version)
-    refresh_token_str, expires_at = create_refresh_token(user_id=db_user.id, token_version=db_user.token_version)
-    db.add(DBRefreshToken(token=refresh_token_str, user_id=db_user.id, expires_at=expires_at))
+    access_token, refresh_token_str = await _issue_session_tokens(db, db_user.id)
     await db.commit()
     return {"status": "success", "message": "Email address successfully verified via code!", "access_token": access_token, "refresh_token": refresh_token_str}
 
@@ -203,12 +243,10 @@ async def reset_pass_with_code(reset_data: UserResetPasswordSchema, db: AsyncSes
     if not db_user:
         raise HTTPException(status_code=404, detail="User profile not found.")
     db_user.hashed_password = await _hash_password(reset_data.password)
-    access_token = create_access_token(user_id=db_user.id, token_version=db_user.token_version)
-    refresh_token_str, expires_at = create_refresh_token(user_id=db_user.id, token_version=db_user.token_version)
-    db.add(DBRefreshToken(token=refresh_token_str, user_id=db_user.id, expires_at=expires_at))
+    access_token, refresh_token_str = await _issue_session_tokens(db, db_user.id)
     await db.execute(delete(DBResetPassVerificationCode).where(DBResetPassVerificationCode.email == db_user.email))
     await db.commit()
-    return {"status": "success", "message": "Password Changed successfully verified via Code!", "access_token": access_token, "refresh_token": refresh_token}
+    return {"status": "success", "message": "Password Changed successfully verified via Code!", "access_token": access_token, "refresh_token": refresh_token_str}
 
 
 @router.get("/verify-email")
@@ -229,9 +267,7 @@ async def verify_email(token: str, db: AsyncSession = Depends(get_db)):
         return {"status": "failed", "message": "Email is already verified."}
     db_user.is_verified = True
     await db.commit()
-    access_token = create_access_token(user_id=db_user.id, token_version=db_user.token_version)
-    refresh_token_str, expires_at = create_refresh_token(user_id=db_user.id, token_version=db_user.token_version)
-    db.add(DBRefreshToken(token=refresh_token_str, user_id=db_user.id, expires_at=expires_at))
+    access_token, refresh_token_str = await _issue_session_tokens(db, db_user.id)
     await db.commit()
     return {"status": "success", "message": "Email address successfully verified via Link!", "access_token": access_token, "refresh_token": refresh_token_str}
 
@@ -259,9 +295,7 @@ async def reset_pass(reset_data: UserResetPasswordSchema, db: AsyncSession = Dep
     if not db_user:
         raise HTTPException(status_code=404, detail="User not found")
     db_user.hashed_password = await _hash_password(reset_data.password)
-    access_token = create_access_token(user_id=db_user.id, token_version=db_user.token_version)
-    refresh_token_str, expires_at = create_refresh_token(user_id=db_user.id, token_version=db_user.token_version)
-    db.add(DBRefreshToken(token=refresh_token_str, user_id=db_user.id, expires_at=expires_at))
+    access_token, refresh_token_str = await _issue_session_tokens(db, db_user.id)
     await db.execute(delete(DBResetPassVerificationCode).where(DBResetPassVerificationCode.email == db_user.email))
     await db.commit()
     return {"status": "success", "message": "Password CHanged successfully verified via Link!", "access_token": access_token, "refresh_token": refresh_token_str}
