@@ -1,5 +1,6 @@
 import asyncio
 import json
+import logging
 import time
 
 import jwt
@@ -14,6 +15,8 @@ from app.models import DBAudioAsset, DBUser, DBUserPreferences
 from app.fish_audio import FishAudioError, stream_tts
 from app.routers.voice import tts_streaming_generator
 from app.redis_store import get_redis
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter(tags=["Text-to-Speech (Live)"])
 
@@ -130,9 +133,19 @@ async def live_tts_socket(websocket: WebSocket, token: str = Query(...)):
 
                     bucket = int(time.time()) // max(1, settings.RATE_LIMIT_WINDOW_SECONDS)
                     rate_key = f"echostream:ratelimit:ws:{user.id}:{bucket}"
-                    count = await get_redis().incr(rate_key)
-                    if count == 1:
-                        await get_redis().expire(rate_key, settings.RATE_LIMIT_WINDOW_SECONDS + 1)
+                    try:
+                        redis = get_redis()
+                        count = await redis.incr(rate_key)
+                        if count == 1:
+                            await redis.expire(rate_key, settings.RATE_LIMIT_WINDOW_SECONDS + 1)
+                    except Exception:
+                        # WebSocket rate limiting is protective; Redis failure must not
+                        # terminate an otherwise valid TTS connection.
+                        logger.warning(
+                            "Redis WebSocket rate limiter unavailable; allowing message through",
+                            exc_info=True,
+                        )
+                        count = 0
                     if count > settings.RATE_LIMIT_WS_MESSAGES_PER_MINUTE:
                         await websocket.send_json({"type": "error", "detail": "Too many WebSocket messages. Please slow down."})
                         continue
