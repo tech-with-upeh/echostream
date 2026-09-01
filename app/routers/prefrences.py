@@ -10,7 +10,7 @@ from app.models import DBAudioAsset, DBMutedUser, DBUser, DBUserPreferences
 from app.schemas import EventAlertPreferenceResponse, EventAlertPreferenceSchema, PreferencesSchema
 
 router = APIRouter(tags=["Preferences"])
-_ALLOWED_EVENT_TYPES = {"follow", "like", "share", "subscribe", "gift"}
+_ALLOWED_EVENT_TYPES = {"follow", "like", "gift"}
 
 def _parse_list(value: str | None, default: list[str]) -> list[str]:
     if not value or not value.strip(): return default
