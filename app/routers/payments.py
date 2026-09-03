@@ -32,6 +32,7 @@ router = APIRouter(prefix="/payments", tags=["Payments"])
 
 PAID_PLANS = {"essential", "pro"}
 VALID_INTERVALS = {"month", "year"}
+VALID_HISTORY_SORTS = {"newest", "oldest", "highest", "lowest", "status"}
 
 
 def now_utc() -> datetime:
@@ -123,8 +124,7 @@ async def record_payment_history(
     event: str,
     paid_at: datetime | None,
 ) -> None:
-    """Insert a payment history row. A no-op if this reference is already recorded,
-    since the same charge can be reported by both /verify and the webhook."""
+    """Insert a payment history row once for a transaction reference."""
     if not reference:
         return
 
@@ -196,6 +196,7 @@ async def find_subscription_for_event(
             pass
 
     return None, False
+
 
 async def finalize_pending_change(
     db: AsyncSession,
@@ -274,6 +275,32 @@ async def apply_subscription_event(db: AsyncSession, event: str, data: dict) -> 
         await db.commit()
         return
 
+    if is_pending and event == "charge.failed":
+        user_result = await db.execute(select(DBUser).where(DBUser.id == subscription.user_id))
+        user = user_result.scalar_one_or_none()
+        if not user:
+            return
+        metadata = get_metadata(subscription)
+        channel = str(data.get("channel") or "").lower() or None
+        intended_recurring = metadata.get("purpose") == "new_subscription" and channel not in {"bank", "bank_transfer"}
+        await record_payment_history(
+            db,
+            user_id=user.id,
+            subscription_id=subscription.id,
+            reference=data.get("reference"),
+            plan=metadata.get("pending_plan") or metadata.get("plan") or subscription.plan,
+            interval=metadata.get("pending_interval") or metadata.get("interval"),
+            amount=data.get("amount"),
+            currency=data.get("currency"),
+            status=str(data.get("status") or "failed").lower(),
+            channel=channel,
+            payment_method="recurring" if intended_recurring else "one_time",
+            event=event,
+            paid_at=parse_paystack_datetime(data.get("paid_at")) or parse_paystack_datetime(data.get("created_at")),
+        )
+        await db.commit()
+        return
+
     if is_pending or not subscription:
         return
 
@@ -333,6 +360,23 @@ async def apply_subscription_event(db: AsyncSession, event: str, data: dict) -> 
             payment_method="recurring",
             event=event,
             paid_at=parse_paystack_datetime(data.get("paid_at")) or now_utc(),
+        )
+    elif event == "charge.failed":
+        metadata = get_metadata(subscription)
+        await record_payment_history(
+            db,
+            user_id=user.id,
+            subscription_id=subscription.id,
+            reference=data.get("reference"),
+            plan=subscription.plan,
+            interval=metadata.get("interval"),
+            amount=data.get("amount"),
+            currency=data.get("currency"),
+            status=str(data.get("status") or "failed").lower(),
+            channel=str(data.get("channel") or "").lower() or None,
+            payment_method="recurring",
+            event=event,
+            paid_at=parse_paystack_datetime(data.get("paid_at")) or parse_paystack_datetime(data.get("created_at")),
         )
 
     await db.commit()
@@ -458,12 +502,31 @@ async def verify_payment(
         raise HTTPException(status_code=502, detail=str(exc)) from exc
 
     data = result.get("data") or {}
-    if data.get("status") != "success":
-        return {"status": data.get("status", "failed"), "reference": reference}
-
     metadata = get_metadata(subscription)
     payment_plan = metadata.get("pending_plan") or metadata.get("plan") or subscription.plan
     payment_interval = metadata.get("pending_interval") or metadata.get("interval") or "month"
+    channel = str(data.get("channel") or "").lower()
+
+    if data.get("status") != "success":
+        intended_recurring = metadata.get("purpose") == "new_subscription" and channel not in {"bank", "bank_transfer"}
+        await record_payment_history(
+            db,
+            user_id=current_user.id,
+            subscription_id=subscription.id,
+            reference=reference,
+            plan=payment_plan,
+            interval=payment_interval if payment_interval in VALID_INTERVALS else None,
+            amount=data.get("amount"),
+            currency=data.get("currency"),
+            status=str(data.get("status") or "failed").lower(),
+            channel=channel or None,
+            payment_method="recurring" if intended_recurring else "one_time",
+            event=f"transaction.verify.{str(data.get('status') or 'failed').lower()}",
+            paid_at=parse_paystack_datetime(data.get("paid_at")) or parse_paystack_datetime(data.get("created_at")),
+        )
+        await db.commit()
+        return {"status": data.get("status", "failed"), "reference": reference}
+
     if payment_plan not in PAID_PLANS or payment_interval not in VALID_INTERVALS:
         raise HTTPException(status_code=400, detail="Payment metadata is invalid")
 
@@ -471,7 +534,6 @@ async def verify_payment(
     customer = data.get("customer") or {}
     authorization_code = authorization.get("authorization_code")
     subscription_code = data.get("subscription_code")
-    channel = str(data.get("channel") or "").lower()
     recurring = bool(authorization_code and subscription_code)
     if channel in {"bank", "bank_transfer"} and not subscription_code:
         recurring = False
@@ -661,11 +723,15 @@ async def manage_subscription(
 async def get_payment_history(
     page: int = 1,
     per_page: int = 20,
+    sort: str = "newest",
     current_user: DBUser = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ):
     page = max(page, 1)
     per_page = min(max(per_page, 1), 100)
+    sort = sort.lower().strip()
+    if sort not in VALID_HISTORY_SORTS:
+        raise HTTPException(status_code=400, detail=f"Invalid sort. Use one of: {', '.join(sorted(VALID_HISTORY_SORTS))}")
 
     total = (
         await db.execute(
@@ -675,13 +741,19 @@ async def get_payment_history(
         )
     ).scalar_one()
 
-    result = await db.execute(
-        select(DBPaymentHistory)
-        .where(DBPaymentHistory.user_id == current_user.id)
-        .order_by(DBPaymentHistory.paid_at.desc().nullslast(), DBPaymentHistory.id.desc())
-        .offset((page - 1) * per_page)
-        .limit(per_page)
-    )
+    query = select(DBPaymentHistory).where(DBPaymentHistory.user_id == current_user.id)
+    if sort == "oldest":
+        query = query.order_by(DBPaymentHistory.paid_at.asc().nullslast(), DBPaymentHistory.id.asc())
+    elif sort == "highest":
+        query = query.order_by(DBPaymentHistory.amount.desc().nullslast(), DBPaymentHistory.paid_at.desc().nullslast(), DBPaymentHistory.id.desc())
+    elif sort == "lowest":
+        query = query.order_by(DBPaymentHistory.amount.asc().nullslast(), DBPaymentHistory.paid_at.desc().nullslast(), DBPaymentHistory.id.desc())
+    elif sort == "status":
+        query = query.order_by(DBPaymentHistory.status.asc(), DBPaymentHistory.paid_at.desc().nullslast(), DBPaymentHistory.id.desc())
+    else:
+        query = query.order_by(DBPaymentHistory.paid_at.desc().nullslast(), DBPaymentHistory.id.desc())
+
+    result = await db.execute(query.offset((page - 1) * per_page).limit(per_page))
     items = result.scalars().all()
 
     return PaymentHistoryResponse(
