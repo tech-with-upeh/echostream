@@ -6,7 +6,6 @@ class UserRegisterSchema(BaseModel):
     first_name: str
     last_name: str
     email: EmailStr
-    password: str
 class UserLoginSchema(BaseModel):
     email: EmailStr
     password: str
@@ -122,6 +121,12 @@ class PreferencesSchema(BaseModel):
     class Config: from_attributes = True
 class PaymentHistoryItem(BaseModel):
     id: int
+    payment_id: str
+    receipt_number: str
+    provider: str
+    provider_reference: str
+    billing_type: str
+    method: str | None = None
     reference: str
     plan: str
     interval: str | None = None
@@ -139,6 +144,30 @@ class PaymentHistoryResponse(BaseModel):
     total: int
     page: int
     per_page: int
+class PaymentReceiptCustomer(BaseModel):
+    name: str
+    email: EmailStr
+class PaymentReceiptPayment(BaseModel):
+    payment_id: str
+    receipt_number: str
+    provider: str
+    provider_reference: str
+    plan: str
+    interval: str | None = None
+    billing_type: str
+    method: str | None = None
+    amount: int | None = None
+    currency: str
+    status: str
+    paid_at: datetime | None = None
+class PaymentReceiptSubscription(BaseModel):
+    starts_at: datetime | None = None
+    ends_at: datetime | None = None
+class PaymentReceiptResponse(BaseModel):
+    customer: PaymentReceiptCustomer
+    payment: PaymentReceiptPayment
+    subscription: PaymentReceiptSubscription
+    issued_at: datetime
 class FishVoiceCloneResponse(BaseModel):
     voice_id: str
     provider: str = "fish"
