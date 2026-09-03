@@ -1,4 +1,6 @@
-from sqlalchemy import Column, Integer, String, Boolean, ForeignKey, DateTime, Text, UniqueConstraint
+import uuid
+
+from sqlalchemy import Column, Integer, String, Boolean, ForeignKey, DateTime, Text, UniqueConstraint, event
 from sqlalchemy.orm import relationship
 from app.database import Base
 
@@ -19,7 +21,7 @@ class DBUserSession(Base):
 
 
 class DBRefreshToken(Base):
-    __tablename__="refresh_tokens"; id=Column(Integer,primary_key=True,index=True); token=Column(String,unique=True,index=True,nullable=False); user_id=Column(Integer,ForeignKey("users.id",ondelete="CASCADE"),nullable=False); session_id=Column(String,ForeignKey("user_sessions.id",ondelete="CASCADE"),nullable=False,index=True); expires_at=Column(UTCDateTime,nullable=False); user=relationship("DBUser",back_populates="refresh_tokens"); session=relationship("DBUserSession",back_populates="session")
+    __tablename__="refresh_tokens"; id=Column(Integer,primary_key=True,index=True); token=Column(String,unique=True,index=True,nullable=False); user_id=Column(Integer,ForeignKey("users.id",ondelete="CASCADE"),nullable=False); session_id=Column(String,ForeignKey("user_sessions.id",ondelete="CASCADE"),nullable=False,index=True); expires_at=Column(UTCDateTime,nullable=False); user=relationship("DBUser",back_populates="refresh_tokens"); session=relationship("DBUserSession",back_populates="refresh_tokens")
 
 
 class DBEmailVerificationCode(Base):
@@ -36,6 +38,23 @@ class DBSubscription(Base):
 
 class DBPaymentHistory(Base):
     __tablename__="payment_history"; __table_args__=(UniqueConstraint("reference"), UniqueConstraint("payment_id"), UniqueConstraint("receipt_number")); id=Column(Integer,primary_key=True,index=True); user_id=Column(Integer,ForeignKey("users.id",ondelete="CASCADE"),nullable=False,index=True); subscription_id=Column(Integer,ForeignKey("subscriptions.id",ondelete="SET NULL"),nullable=True,index=True); payment_id=Column(String,nullable=False,index=True); receipt_number=Column(String,nullable=False,index=True); provider=Column(String,nullable=False,default="paystack"); provider_reference=Column(String,nullable=False); billing_type=Column(String,nullable=False,default="unknown"); method=Column(String,nullable=True); reference=Column(String,nullable=False,index=True); plan=Column(String,nullable=False); interval=Column(String,nullable=True); amount=Column(Integer,nullable=True); currency=Column(String,nullable=False,default="NGN"); status=Column(String,nullable=False); channel=Column(String,nullable=True); payment_method=Column(String,nullable=True); event=Column(String,nullable=False); paid_at=Column(UTCDateTime,nullable=True); created_at=Column(UTCDateTime,nullable=False); user=relationship("DBUser",back_populates="payment_history")
+
+
+@event.listens_for(DBPaymentHistory, "before_insert")
+def populate_payment_identity(mapper, connection, target):
+    if not target.payment_id:
+        target.payment_id = f"ES-PAY-{uuid.uuid4().hex}"
+    if not target.receipt_number:
+        target.receipt_number = f"ES-RCP-{uuid.uuid4().hex}"
+    if not target.provider:
+        target.provider = "paystack"
+    if not target.provider_reference and target.reference:
+        target.provider_reference = target.reference
+    if not target.billing_type:
+        target.billing_type = target.payment_method or "unknown"
+    if not target.method:
+        channel = (target.channel or "").lower()
+        target.method = channel if channel in {"card", "bank", "bank_transfer", "ussd", "qr", "mobile_money"} else None
 
 
 class DBUserPreferences(Base):
