@@ -34,8 +34,7 @@ def upgrade() -> None:
                 provider_reference = reference,
                 billing_type = CASE
                     WHEN payment_method = 'recurring' THEN 'recurring'
-                    WHEN payment_method = 'one_time' THEN 'one_time'
-                    ELSE 'unknown'
+                    ELSE 'one_time'
                 END,
                 method = CASE
                     WHEN lower(coalesce(channel, '')) IN ('card', 'bank', 'bank_transfer', 'ussd', 'qr', 'mobile_money')
