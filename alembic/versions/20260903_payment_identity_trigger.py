@@ -37,7 +37,10 @@ def upgrade() -> None:
             END IF;
 
             IF NEW.billing_type IS NULL OR NEW.billing_type = '' THEN
-                NEW.billing_type := coalesce(NEW.payment_method, 'unknown');
+                NEW.billing_type := CASE
+                    WHEN NEW.payment_method = 'recurring' THEN 'recurring'
+                    ELSE 'one_time'
+                END;
             END IF;
 
             IF NEW.method IS NULL OR NEW.method = '' THEN
