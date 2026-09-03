@@ -1,6 +1,6 @@
 """Generate payment identity fields for Core and ORM inserts.
 
-Revision ID: 20260903_payment_identity_trigger
+Revision ID: 20260903_payment_identity_trg
 Revises: 20260903_payment_identity
 """
 
@@ -8,7 +8,7 @@ from typing import Sequence, Union
 
 from alembic import op
 
-revision: str = "20260903_payment_identity_trigger"
+revision: str = "20260903_payment_identity_trg"
 down_revision: Union[str, Sequence[str], None] = "20260903_payment_identity"
 branch_labels: Union[str, Sequence[str], None] = None
 depends_on: Union[str, Sequence[str], None] = None
