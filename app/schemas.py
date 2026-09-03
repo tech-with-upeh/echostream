@@ -120,6 +120,25 @@ class PreferencesSchema(BaseModel):
     spam_cooldown_seconds: int = Field(2, ge=1, le=60)
     spam_max_requests_per_minute: int = Field(10, ge=1, le=120)
     class Config: from_attributes = True
+class PaymentHistoryItem(BaseModel):
+    id: int
+    reference: str
+    plan: str
+    interval: str | None = None
+    amount: int | None = None
+    currency: str = "NGN"
+    status: str
+    channel: str | None = None
+    payment_method: str | None = None
+    event: str
+    paid_at: datetime | None = None
+    created_at: datetime
+    class Config: from_attributes = True
+class PaymentHistoryResponse(BaseModel):
+    items: list[PaymentHistoryItem]
+    total: int
+    page: int
+    per_page: int
 class FishVoiceCloneResponse(BaseModel):
     voice_id: str
     provider: str = "fish"

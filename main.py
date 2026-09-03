@@ -2,7 +2,7 @@ import asyncio
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
-
+from fastapi.middleware.cors import CORSMiddleware
 from app.gift_catalog import gift_catalog_scheduler
 from app.live_runtime import command_listener, owner_heartbeat
 from app.rate_limit import RedisRateLimitMiddleware
@@ -29,6 +29,19 @@ async def lifespan(app: FastAPI):
 
 
 app = FastAPI(title="EchoStream Backend API", lifespan=lifespan)
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=[
+        "http://localhost:3000",
+        "http://127.0.0.1:3000",
+        "https://0a47-102-90-103-164.ngrok-free.app"
+        # your production frontend URL goes here
+    ],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
 app.add_middleware(RedisRateLimitMiddleware)
 
 app.include_router(auth.router)

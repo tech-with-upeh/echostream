@@ -97,6 +97,28 @@ async def verify_transaction(reference: str) -> dict[str, Any]:
     )
 
 
+async def list_transactions(
+    *,
+    customer: str | int | None = None,
+    status: str | None = None,
+    page: int = 1,
+    per_page: int = 50,
+) -> dict[str, Any]:
+    """List transactions, optionally scoped to a Paystack customer code/ID.
+    Used for backfilling payment history from Paystack's own records."""
+    params: dict[str, Any] = {"page": page, "perPage": per_page}
+    if customer is not None:
+        params["customer"] = customer
+    if status:
+        params["status"] = status
+
+    return await paystack_request(
+        "GET",
+        "/transaction",
+        params=params,
+    )
+
+
 # ---------------------------------------------------------------------------
 # Paystack plans
 # ---------------------------------------------------------------------------

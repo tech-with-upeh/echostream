@@ -1,16 +1,18 @@
 import json
 import uuid
 from datetime import datetime, timezone
+from typing import Any
 
 import httpx
 from fastapi import APIRouter, Depends, Header, HTTPException, Request, status
 from fastapi.responses import RedirectResponse
-from sqlalchemy import select
+from sqlalchemy import func, select
+from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import settings
 from app.dependencies import get_current_user, get_db
-from app.models import DBSubscription, DBUser
+from app.models import DBPaymentHistory, DBSubscription, DBUser
 from app.paystack_service import (
     PaystackError,
     create_plan,
@@ -24,6 +26,7 @@ from app.paystack_service import (
     verify_transaction,
     verify_webhook_signature,
 )
+from app.schemas import PaymentHistoryItem, PaymentHistoryResponse
 
 router = APIRouter(prefix="/payments", tags=["Payments"])
 
@@ -102,6 +105,51 @@ def update_subscription_period(user: DBUser, subscription: DBSubscription, data:
 async def get_user_subscription(db: AsyncSession, user_id: int) -> DBSubscription | None:
     result = await db.execute(select(DBSubscription).where(DBSubscription.user_id == user_id))
     return result.scalar_one_or_none()
+
+
+async def record_payment_history(
+    db: AsyncSession,
+    *,
+    user_id: int,
+    subscription_id: int | None,
+    reference: str | None,
+    plan: str,
+    interval: str | None,
+    amount: Any = None,
+    currency: str | None,
+    status: str,
+    channel: str | None,
+    payment_method: str | None,
+    event: str,
+    paid_at: datetime | None,
+) -> None:
+    """Insert a payment history row. A no-op if this reference is already recorded,
+    since the same charge can be reported by both /verify and the webhook."""
+    if not reference:
+        return
+
+    amount_int: int | None
+    try:
+        amount_int = int(amount) if amount is not None else None
+    except (TypeError, ValueError):
+        amount_int = None
+
+    stmt = insert(DBPaymentHistory).values(
+        user_id=user_id,
+        subscription_id=subscription_id,
+        reference=reference,
+        plan=plan,
+        interval=interval,
+        amount=amount_int,
+        currency=(currency or "NGN").upper(),
+        status=status,
+        channel=channel,
+        payment_method=payment_method,
+        event=event,
+        paid_at=paid_at,
+        created_at=now_utc(),
+    ).on_conflict_do_nothing(index_elements=[DBPaymentHistory.reference])
+    await db.execute(stmt)
 
 
 async def find_subscription_for_event(
@@ -208,6 +256,21 @@ async def apply_subscription_event(db: AsyncSession, event: str, data: dict) -> 
         if not user:
             return
         await finalize_pending_change(db, subscription, user, subscription_code, data)
+        await record_payment_history(
+            db,
+            user_id=user.id,
+            subscription_id=subscription.id,
+            reference=data.get("reference"),
+            plan=subscription.plan,
+            interval=get_metadata(subscription).get("interval"),
+            amount=data.get("amount"),
+            currency=data.get("currency"),
+            status="success",
+            channel=data.get("channel"),
+            payment_method="recurring",
+            event=event,
+            paid_at=parse_paystack_datetime(data.get("paid_at")) or now_utc(),
+        )
         await db.commit()
         return
 
@@ -254,6 +317,23 @@ async def apply_subscription_event(db: AsyncSession, event: str, data: dict) -> 
             user.subscription_status = "active"
             user.subscription_ends_at = None
             subscription.current_period_end = None
+
+    if event == "charge.success":
+        await record_payment_history(
+            db,
+            user_id=user.id,
+            subscription_id=subscription.id,
+            reference=data.get("reference"),
+            plan=subscription.plan,
+            interval=get_metadata(subscription).get("interval"),
+            amount=data.get("amount"),
+            currency=data.get("currency"),
+            status="success",
+            channel=data.get("channel"),
+            payment_method="recurring",
+            event=event,
+            paid_at=parse_paystack_datetime(data.get("paid_at")) or now_utc(),
+        )
 
     await db.commit()
 
@@ -439,6 +519,23 @@ async def verify_payment(
     current_user.plan = payment_plan
     current_user.subscription_status = "active"
     current_user.subscription_ends_at = period_end
+
+    await record_payment_history(
+        db,
+        user_id=current_user.id,
+        subscription_id=subscription.id,
+        reference=reference,
+        plan=payment_plan,
+        interval=payment_interval,
+        amount=data.get("amount"),
+        currency=data.get("currency"),
+        status="success",
+        channel=channel or None,
+        payment_method="recurring" if recurring else "one_time",
+        event=subscription.last_event,
+        paid_at=paid_at,
+    )
+
     await db.commit()
 
     return {
@@ -558,6 +655,41 @@ async def manage_subscription(
         "can_cancel": subscription.status in {"active", "non-renewing"},
         "can_renew": False,
     }
+
+
+@router.get("/history", response_model=PaymentHistoryResponse)
+async def get_payment_history(
+    page: int = 1,
+    per_page: int = 20,
+    current_user: DBUser = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    page = max(page, 1)
+    per_page = min(max(per_page, 1), 100)
+
+    total = (
+        await db.execute(
+            select(func.count())
+            .select_from(DBPaymentHistory)
+            .where(DBPaymentHistory.user_id == current_user.id)
+        )
+    ).scalar_one()
+
+    result = await db.execute(
+        select(DBPaymentHistory)
+        .where(DBPaymentHistory.user_id == current_user.id)
+        .order_by(DBPaymentHistory.paid_at.desc().nullslast(), DBPaymentHistory.id.desc())
+        .offset((page - 1) * per_page)
+        .limit(per_page)
+    )
+    items = result.scalars().all()
+
+    return PaymentHistoryResponse(
+        items=[PaymentHistoryItem.model_validate(item) for item in items],
+        total=total,
+        page=page,
+        per_page=per_page,
+    )
 
 
 @router.post("/webhook", status_code=status.HTTP_200_OK)
