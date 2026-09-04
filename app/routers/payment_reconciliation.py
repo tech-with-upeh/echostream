@@ -3,7 +3,7 @@ import json
 import uuid
 from datetime import datetime, timezone
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import RedirectResponse
 from sqlalchemy import select
 from sqlalchemy.dialects.postgresql import insert
@@ -12,7 +12,15 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.config import settings
 from app.dependencies import get_current_user, get_db
 from app.models import DBPaymentHistory, DBSubscription, DBUser
-from app.paystack_service import PaystackError, disable_subscription, fetch_customer_subscriptions_by_code, fetch_subscription, get_plan_code, verify_transaction
+from app.paystack_service import (
+    PaystackError,
+    disable_subscription,
+    fetch_customer_subscriptions_by_code,
+    fetch_subscription,
+    get_plan_code,
+    verify_transaction,
+    verify_webhook_signature,
+)
 
 router = APIRouter(prefix="/payments", tags=["Payments"])
 PAID_PLANS = {"essential", "pro"}
@@ -333,3 +341,57 @@ async def verify_payment(reference: str, current_user: DBUser = Depends(get_curr
         "subscription_code": subscription_code,
         "reference": reference,
     }
+
+
+@router.post("/webhook", status_code=200)
+async def paystack_webhook(request: Request, db: AsyncSession = Depends(get_db)):
+    raw_body = await request.body()
+    signature = request.headers.get("x-paystack-signature", "")
+    if not verify_webhook_signature(raw_body, signature):
+        raise HTTPException(status_code=401, detail="Invalid webhook signature")
+
+    try:
+        payload = json.loads(raw_body.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise HTTPException(status_code=400, detail="Invalid webhook payload") from exc
+
+    event = str(payload.get("event") or "")
+    data = payload.get("data") or {}
+
+    # Charge events are transaction records. Reconcile them here so the
+    # payment-history schema is the only representation used for history.
+    # Non-charge subscription lifecycle events still use the existing
+    # subscription-event handler in payments.py.
+    if event in {"charge.success", "charge.failed"}:
+        reference = data.get("reference")
+        metadata = data.get("metadata") or {}
+        user_id = metadata.get("user_id") if isinstance(metadata, dict) else None
+        local_subscription = None
+        if reference:
+            local_subscription = await _find_local_subscription(db, reference, int(user_id) if user_id is not None else None)
+        if not local_subscription and user_id is not None:
+            try:
+                local_subscription = await get_user_subscription_for_user(db, int(user_id))
+            except (TypeError, ValueError):
+                local_subscription = None
+        if not local_subscription:
+            raise HTTPException(status_code=404, detail="Payment reference not found")
+        user_result = await db.execute(select(DBUser).where(DBUser.id == local_subscription.user_id))
+        user = user_result.scalar_one_or_none()
+        if not user:
+            raise HTTPException(status_code=404, detail="User not found")
+        await _sync_transaction(db, data, local_subscription, user)
+        return {"received": True}
+
+    # Delegate non-charge lifecycle events to the established subscription
+    # state machine. It does not create payment-history rows for lifecycle
+    # events such as subscription.not_renew.
+    from app.routers.payments import apply_subscription_event
+
+    await apply_subscription_event(db, event, data)
+    return {"received": True}
+
+
+async def get_user_subscription_for_user(db: AsyncSession, user_id: int) -> DBSubscription | None:
+    result = await db.execute(select(DBSubscription).where(DBSubscription.user_id == user_id))
+    return result.scalar_one_or_none()
