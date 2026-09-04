@@ -17,7 +17,7 @@ class DBAudioAsset(Base):
 
 
 class DBUserSession(Base):
-    __tablename__="user_sessions"; id=Column(String,primary_key=True); user_id=Column(Integer,ForeignKey("users.id",ondelete="CASCADE"),nullable=False,index=True); created_at=Column(UTCDateTime,nullable=False); last_used_at=Column(UTCDateTime,nullable=False); revoked_at=Column(UTCDateTime,nullable=True,index=True); user=relationship("DBUser",back_populates="sessions"); refresh_tokens=relationship("DBRefreshToken",back_populates="refresh_tokens",cascade="all, delete-orphan")
+    __tablename__="user_sessions"; id=Column(String,primary_key=True); user_id=Column(Integer,ForeignKey("users.id",ondelete="CASCADE"),nullable=False,index=True); created_at=Column(UTCDateTime,nullable=False); last_used_at=Column(UTCDateTime,nullable=False); revoked_at=Column(UTCDateTime,nullable=True,index=True); user=relationship("DBUser",back_populates="sessions"); refresh_tokens=relationship("DBRefreshToken",back_populates="session",cascade="all, delete-orphan")
 
 
 class DBRefreshToken(Base):
@@ -67,7 +67,7 @@ class DBGiftCatalogSync(Base):
 
 
 class DBGiftPreference(Base):
-    __tablename__="gift_preferences"; id=Column(Integer,primary_key=True,index=True); owner_id=Column(Integer,ForeignKey("users.id",ondelete="CASCADE"),nullable=False,index=True); gift_id=Column(String,nullable=False); gift_name=Column(String,nullable=False,default=""); enabled=Column(Boolean,nullable=False,default=True); alert_type=Column(String,nullable=False,default="tts"); tts_template=Column(String,nullable=True); tts_provider=Column(String,nullable=True); voice=Column(String,nullable=True); fish_voice_id=Column(String,nullable=True); fish_model=Column(String,nullable=True); system_sound_id=Column(String,nullable=True); custom_audio_id=Column(Integer,ForeignKey("audio_assets.id",ondelete="SET NULL"),nullable=True); custom_audio_url=Column(String,nullable=True); volume=Column(Integer,nullable=True); speed=Column(Integer,nullable=True); pitch=Column(String,nullable=True); owner=relationship("DBUser",back_populates="gift_preferences"); custom_audio=relationship("DBAudioAsset",foreign_keys=[custom_audio_id])
+    __tablename__="gift_preferences"; __table_args__=(UniqueConstraint("owner_id","gift_id"),); id=Column(Integer,primary_key=True,index=True); owner_id=Column(Integer,ForeignKey("users.id",ondelete="CASCADE"),nullable=False,index=True); gift_id=Column(String,nullable=False); gift_name=Column(String,nullable=False,default=""); enabled=Column(Boolean,nullable=False,default=True); alert_type=Column(String,nullable=False,default="tts"); tts_template=Column(String,nullable=True); tts_provider=Column(String,nullable=True); voice=Column(String,nullable=True); fish_voice_id=Column(String,nullable=True); fish_model=Column(String,nullable=True); system_sound_id=Column(String,nullable=True); custom_audio_id=Column(Integer,ForeignKey("audio_assets.id",ondelete="SET NULL"),nullable=True); custom_audio_url=Column(String,nullable=True); volume=Column(Integer,nullable=True); speed=Column(Integer,nullable=True); pitch=Column(String,nullable=True); owner=relationship("DBUser",back_populates="gift_preferences"); custom_audio=relationship("DBAudioAsset",foreign_keys=[custom_audio_id])
 
 
 class DBFishVoice(Base):
