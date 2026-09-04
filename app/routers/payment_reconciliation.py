@@ -12,14 +12,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.config import settings
 from app.dependencies import get_current_user, get_db
 from app.models import DBPaymentHistory, DBSubscription, DBUser
-from app.paystack_service import (
-    PaystackError,
-    disable_subscription,
-    fetch_customer_subscriptions_by_code,
-    fetch_subscription,
-    get_plan_code,
-    verify_transaction,
-)
+from app.paystack_service import PaystackError, disable_subscription, fetch_customer_subscriptions_by_code, fetch_subscription, get_plan_code, verify_transaction
 
 router = APIRouter(prefix="/payments", tags=["Payments"])
 PAID_PLANS = {"essential", "pro"}
@@ -100,31 +93,19 @@ async def _find_local_subscription(db: AsyncSession, reference: str, user_id: in
     if subscription:
         return subscription
     if user_id is not None:
-        result = await db.execute(
-            select(DBSubscription).where(
-                DBSubscription.user_id == user_id,
-                DBSubscription.metadata_json.like(f'%"pending_change_reference": "{reference}"%'),
-            )
-        )
+        result = await db.execute(select(DBSubscription).where(DBSubscription.user_id == user_id, DBSubscription.metadata_json.like(f'%\"pending_change_reference\": \"{reference}\"%')))
         return result.scalar_one_or_none()
     return None
 
 
-async def _find_paystack_subscription(
-    customer_code: str | None,
-    authorization_code: str | None,
-    plan: str | None,
-    interval: str | None,
-) -> tuple[dict | None, str | None]:
+async def _find_paystack_subscription(customer_code: str | None, authorization_code: str | None, plan: str | None, interval: str | None) -> tuple[dict | None, str | None]:
     if not customer_code:
         return None, None
-
     for attempt in range(2):
         try:
             result = await fetch_customer_subscriptions_by_code(customer_code)
         except PaystackError:
             result = None
-
         if result is not None:
             subscriptions = result.get("data") or []
             candidates = []
@@ -134,37 +115,26 @@ async def _find_paystack_subscription(
                     target_plan_code = get_plan_code(plan, interval)
                 except PaystackError:
                     pass
-
             for item in subscriptions:
-                if not isinstance(item, dict):
-                    continue
-                if str(item.get("status", "")).lower() not in {"active", "non-renewing"}:
+                if not isinstance(item, dict) or str(item.get("status", "")).lower() not in {"active", "non-renewing"}:
                     continue
                 auth = item.get("authorization") or {}
                 item_auth = auth.get("authorization_code") if isinstance(auth, dict) else None
                 item_plan = item.get("plan") or {}
                 item_plan_code = item_plan.get("plan_code") if isinstance(item_plan, dict) else None
-                score = 0
-                if authorization_code and item_auth == authorization_code:
-                    score += 100
-                if target_plan_code and item_plan_code == target_plan_code:
-                    score += 50
+                score = (100 if authorization_code and item_auth == authorization_code else 0) + (50 if target_plan_code and item_plan_code == target_plan_code else 0)
                 if score:
                     candidates.append((score, item))
-
             if candidates:
                 candidates.sort(key=lambda value: value[0], reverse=True)
                 selected = candidates[0][1]
                 return selected, selected.get("subscription_code")
-
         if attempt == 0:
             await asyncio.sleep(0.5)
-
     return None, None
 
 
 async def _disable_previous_paystack_subscription(subscription_code: str | None) -> None:
-    """Best-effort cancellation before a one-time payment replaces local state."""
     if not subscription_code:
         return
     try:
@@ -174,74 +144,59 @@ async def _disable_previous_paystack_subscription(subscription_code: str | None)
             if email_token:
                 await disable_subscription(subscription_code, email_token)
     except PaystackError:
-        # Local state must still be updated; webhook/reconciliation can retry
-        # cancellation later if Paystack did not accept the request here.
         pass
 
 
-async def _sync_transaction(
-    db: AsyncSession,
-    data: dict,
-    local_subscription: DBSubscription | None,
-    user: DBUser,
-) -> tuple[bool, str | None]:
+def _payment_method_details(data: dict) -> tuple[str | None, str | None, str | None]:
+    authorization = data.get("authorization") or {}
+    if not isinstance(authorization, dict):
+        authorization = {}
+    method = str(data.get("channel") or authorization.get("channel") or "").lower().strip() or None
+    brand = str(authorization.get("brand") or authorization.get("card_type") or "").strip() or None
+    last4 = str(authorization.get("last4") or "").strip() or None
+    return method, brand, last4
+
+
+async def _sync_transaction(db: AsyncSession, data: dict, local_subscription: DBSubscription | None, user: DBUser) -> tuple[bool, str | None]:
     metadata = _metadata(local_subscription, data)
     plan, interval = _transaction_plan_interval(data, local_subscription)
     customer = data.get("customer") or {}
     authorization = data.get("authorization") or {}
     customer_code = customer.get("customer_code") if isinstance(customer, dict) else None
     authorization_code = authorization.get("authorization_code") if isinstance(authorization, dict) else None
-    channel = str(data.get("channel") or "").lower() or None
+    channel, method_brand, method_last4 = _payment_method_details(data)
     status_value = str(data.get("status") or "unknown").lower()
     paid_at = _parse_dt(data.get("paid_at")) or _parse_dt(data.get("created_at")) or _now()
-
-    paystack_subscription, subscription_code = await _find_paystack_subscription(
-        customer_code, authorization_code, plan, interval
-    )
-
-    # Billing classification starts from the actual payment channel. Paystack
-    # subscription lookup is used as confirmation/upgrade evidence, never to
-    # turn bank/bank-transfer/USSD/etc. into a locally manageable subscription.
+    paystack_subscription, subscription_code = await _find_paystack_subscription(customer_code, authorization_code, plan, interval)
     recurring = channel in RECURRING_CHANNELS
     if paystack_subscription and subscription_code and channel in RECURRING_CHANNELS:
         recurring = True
-
     if not plan and local_subscription:
         plan = local_subscription.plan
     if plan not in PAID_PLANS:
         raise HTTPException(status_code=400, detail="Payment metadata does not identify a paid plan")
-
     if interval not in VALID_INTERVALS:
         interval = _interval_from_plan((paystack_subscription or {}).get("plan") or {})
     if not interval:
         interval = metadata.get("interval") if metadata.get("interval") in VALID_INTERVALS else None
-
     old_subscription_code = local_subscription.paystack_subscription_code if local_subscription else None
-
     if local_subscription:
-        # The latest successful transaction owns the single active subscription
-        # record. A one-time payment therefore replaces any previous recurring
-        # management state instead of retaining the old subscription code.
         if status_value == "success" and not recurring and old_subscription_code:
             await _disable_previous_paystack_subscription(old_subscription_code)
-
         local_subscription.plan = plan
         local_subscription.reference = data.get("reference") or local_subscription.reference
         local_subscription.status = "active" if status_value == "success" else status_value
         local_subscription.cancel_at_period_end = False
         local_subscription.last_event = "transaction.verify.recurring" if recurring else "transaction.verify.one_time"
         local_subscription.updated_at = _now()
-
         if customer_code:
             local_subscription.paystack_customer_code = customer_code
-
         if recurring:
             local_subscription.paystack_subscription_code = subscription_code
             local_subscription.authorization_code = authorization_code
         else:
             local_subscription.paystack_subscription_code = None
             local_subscription.authorization_code = None
-
         if paystack_subscription and recurring:
             start = _parse_dt(paystack_subscription.get("start"))
             end = _parse_dt(paystack_subscription.get("next_payment_date"))
@@ -250,7 +205,6 @@ async def _sync_transaction(
             if end:
                 local_subscription.current_period_end = end
                 user.subscription_ends_at = end
-
             try:
                 detail = (await fetch_subscription(subscription_code)).get("data") or {}
                 end = _parse_dt(detail.get("next_payment_date"))
@@ -268,36 +222,25 @@ async def _sync_transaction(
             else:
                 local_subscription.current_period_end = None
                 user.subscription_ends_at = None
-
         local_metadata = _metadata(local_subscription, {})
-        local_metadata.update({
-            "plan": plan,
-            "recurring": recurring,
-            "payment_channel": channel or "unknown",
-        })
+        local_metadata.update({"plan": plan, "recurring": recurring, "payment_channel": channel or "unknown"})
         if interval:
             local_metadata["interval"] = interval
         local_metadata["last_payment_reference"] = data.get("reference")
-        local_metadata.pop("pending_plan", None)
-        local_metadata.pop("pending_interval", None)
-        local_metadata.pop("pending_subscription_code", None)
-        local_metadata.pop("pending_change_reference", None)
+        for key in ("pending_plan", "pending_interval", "pending_subscription_code", "pending_change_reference"):
+            local_metadata.pop(key, None)
         if not recurring:
-            # These fields must never leave stale management information for a
-            # one-time active payment.
             local_metadata.pop("old_subscription_code", None)
             local_metadata["recurring"] = False
         local_subscription.metadata_json = json.dumps(local_metadata)
-
     if status_value == "success":
         user.plan = plan
         user.subscription_status = "active"
         if local_subscription:
             user.subscription_ends_at = local_subscription.current_period_end
-
     reference = data.get("reference")
     if reference:
-        payment_values = {
+        values = {
             "user_id": user.id,
             "subscription_id": local_subscription.id if local_subscription else None,
             "payment_id": f"ES-PAY-{uuid.uuid4().hex}",
@@ -310,36 +253,32 @@ async def _sync_transaction(
             "amount": int(data.get("amount") or 0) / 100,
             "currency": str(data.get("currency") or "NGN").upper(),
             "status": status_value,
-            "channel": channel,
-            "method": channel,
-            "payment_method": "recurring" if recurring else "one_time",
             "billing_type": "recurring" if recurring else "one_time",
+            "method": channel,
+            "method_brand": method_brand,
+            "method_last4": method_last4,
             "event": "transaction.verify.recurring" if recurring else "transaction.verify.one_time",
             "paid_at": paid_at,
             "created_at": _now(),
         }
-        stmt = insert(DBPaymentHistory).values(**payment_values)
-        stmt = stmt.on_conflict_do_update(
-            index_elements=[DBPaymentHistory.reference],
-            set_={
-                "subscription_id": stmt.excluded.subscription_id,
-                "provider": stmt.excluded.provider,
-                "provider_reference": stmt.excluded.provider_reference,
-                "plan": stmt.excluded.plan,
-                "interval": stmt.excluded.interval,
-                "amount": stmt.excluded.amount,
-                "currency": stmt.excluded.currency,
-                "status": stmt.excluded.status,
-                "channel": stmt.excluded.channel,
-                "method": stmt.excluded.method,
-                "payment_method": stmt.excluded.payment_method,
-                "billing_type": stmt.excluded.billing_type,
-                "event": stmt.excluded.event,
-                "paid_at": stmt.excluded.paid_at,
-            },
-        )
+        stmt = insert(DBPaymentHistory).values(**values)
+        stmt = stmt.on_conflict_do_update(index_elements=[DBPaymentHistory.reference], set_={
+            "subscription_id": stmt.excluded.subscription_id,
+            "provider": stmt.excluded.provider,
+            "provider_reference": stmt.excluded.provider_reference,
+            "plan": stmt.excluded.plan,
+            "interval": stmt.excluded.interval,
+            "amount": stmt.excluded.amount,
+            "currency": stmt.excluded.currency,
+            "status": stmt.excluded.status,
+            "billing_type": stmt.excluded.billing_type,
+            "method": stmt.excluded.method,
+            "method_brand": stmt.excluded.method_brand,
+            "method_last4": stmt.excluded.method_last4,
+            "event": stmt.excluded.event,
+            "paid_at": stmt.excluded.paid_at,
+        })
         await db.execute(stmt)
-
     await db.commit()
     return recurring, subscription_code if recurring else None
 
@@ -348,12 +287,10 @@ async def _verify_and_sync(db: AsyncSession, reference: str, user: DBUser) -> tu
     local_subscription = await _find_local_subscription(db, reference, user.id)
     if not local_subscription:
         raise HTTPException(status_code=404, detail="Payment reference not found")
-
     try:
         result = await verify_transaction(reference)
     except PaystackError as exc:
         raise HTTPException(status_code=502, detail=str(exc)) from exc
-
     data = result.get("data") or {}
     customer = data.get("customer") or {}
     metadata = _metadata(local_subscription, data)
@@ -361,45 +298,32 @@ async def _verify_and_sync(db: AsyncSession, reference: str, user: DBUser) -> tu
         raise HTTPException(status_code=403, detail="Payment does not belong to this user")
     if customer.get("email") and str(customer["email"]).lower() != str(user.email).lower():
         raise HTTPException(status_code=403, detail="Payment does not belong to this user")
-
     recurring, subscription_code = await _sync_transaction(db, data, local_subscription, user)
     return data, recurring, subscription_code
 
 
 @router.get("/callback", include_in_schema=False)
-async def payment_callback(
-    reference: str | None = None,
-    trxref: str | None = None,
-    db: AsyncSession = Depends(get_db),
-):
+async def payment_callback(reference: str | None = None, trxref: str | None = None, db: AsyncSession = Depends(get_db)):
     payment_reference = reference or trxref
     if not payment_reference:
         return RedirectResponse(url=f"{settings.FRONTEND_URL}/payment/failed")
-
     local_subscription = await _find_local_subscription(db, payment_reference)
     if not local_subscription:
         return RedirectResponse(url=f"{settings.FRONTEND_URL}/payment/failed?reference={payment_reference}")
-
     user_result = await db.execute(select(DBUser).where(DBUser.id == local_subscription.user_id))
     user = user_result.scalar_one_or_none()
     if not user:
         return RedirectResponse(url=f"{settings.FRONTEND_URL}/payment/failed?reference={payment_reference}")
-
     try:
         data, _, _ = await _verify_and_sync(db, payment_reference, user)
     except HTTPException:
         return RedirectResponse(url=f"{settings.FRONTEND_URL}/payment/failed?reference={payment_reference}")
-
     target = "/payment/success" if str(data.get("status")).lower() == "success" else "/payment/failed"
     return RedirectResponse(url=f"{settings.FRONTEND_URL}{target}?reference={payment_reference}")
 
 
 @router.get("/verify/{reference}")
-async def verify_payment(
-    reference: str,
-    current_user: DBUser = Depends(get_current_user),
-    db: AsyncSession = Depends(get_db),
-):
+async def verify_payment(reference: str, current_user: DBUser = Depends(get_current_user), db: AsyncSession = Depends(get_db)):
     data, recurring, subscription_code = await _verify_and_sync(db, reference, current_user)
     return {
         "status": str(data.get("status") or "unknown").lower(),
