@@ -17,7 +17,7 @@ class DBAudioAsset(Base):
 
 
 class DBUserSession(Base):
-    __tablename__="user_sessions"; id=Column(String,primary_key=True); user_id=Column(Integer,ForeignKey("users.id",ondelete="CASCADE"),nullable=False,index=True); created_at=Column(UTCDateTime,nullable=False); last_used_at=Column(UTCDateTime,nullable=False); revoked_at=Column(UTCDateTime,nullable=True,index=True); user=relationship("DBUser",back_populates="sessions"); refresh_tokens=relationship("DBRefreshToken",back_populates="session",cascade="all, delete-orphan")
+    __tablename__="user_sessions"; id=Column(String,primary_key=True); user_id=Column(Integer,ForeignKey("users.id",ondelete="CASCADE"),nullable=False,index=True); created_at=Column(UTCDateTime,nullable=False); last_used_at=Column(UTCDateTime,nullable=False); revoked_at=Column(UTCDateTime,nullable=True,index=True); user=relationship("DBUser",back_populates="sessions"); refresh_tokens=relationship("DBRefreshToken",back_populates="refresh_tokens",cascade="all, delete-orphan")
 
 
 class DBRefreshToken(Base):
@@ -59,7 +59,7 @@ class DBUserPreferences(Base):
 
 
 class DBTikTokGift(Base):
-    __tablename__="tiktok_gifts"; __table_args__=(UniqueConstraint("tiktok_gift_id"),); id=Column(Integer,primary_key=True,index=True); tiktok_gift_id=Column(Integer,nullable=False,index=True); name=Column(String,nullable=False); diamond_count=Column(Integer,nullable=True); type=Column(Integer,nullable=True); image_url=Column(String,nullable=True); is_active=Column(Boolean,nullable=False,default=True,index=True); created_at=Column(UTCDateTime,nullable=False); updated_at=Column(UTCDateTime,nullable=False)
+    __tablename__="tiktok_gifts"; __table_args__=(UniqueConstraint("tiktok_gift_id"),); id=Column(Integer,primary_key=True,index=True); tiktok_gift_id=Column(String,nullable=False,index=True); name=Column(String,nullable=False); diamond_count=Column(Integer,nullable=True); type=Column(Integer,nullable=True); image_url=Column(String,nullable=True); is_active=Column(Boolean,nullable=False,default=True,index=True); created_at=Column(UTCDateTime,nullable=False); updated_at=Column(UTCDateTime,nullable=False)
 
 
 class DBGiftCatalogSync(Base):
