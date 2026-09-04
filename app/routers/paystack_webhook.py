@@ -7,8 +7,8 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.dependencies import get_db
 from app.models import DBSubscription, DBUser
-from app.paystack_service import verify_webhook_signature
-from app.routers.payments import apply_subscription_event, get_metadata, parse_paystack_datetime
+from app.paystack_service import fetch_subscription, verify_webhook_signature
+from app.routers.payments import apply_subscription_event, parse_paystack_datetime
 
 router = APIRouter(prefix="/payments", tags=["Payments"])
 
@@ -59,6 +59,49 @@ async def find_subscription(db: AsyncSession, subscription_code: str | None) -> 
     return result.scalar_one_or_none()
 
 
+def extract_subscription_code_from_refund(data: dict) -> str | None:
+    """Extract the subscription code from Paystack's update-card refund note."""
+    for key in ("customer_note", "merchant_note"):
+        note = data.get(key)
+        if not isinstance(note, str):
+            continue
+        marker = "[Subscription:"
+        start = note.find(marker)
+        if start == -1:
+            continue
+        start += len(marker)
+        end = note.find("]", start)
+        if end == -1:
+            continue
+        code = note[start:end].strip()
+        if code:
+            return code
+    return None
+
+
+async def refresh_payment_details_from_paystack(
+    db: AsyncSession,
+    subscription_code: str | None,
+) -> None:
+    """Fetch the subscription after an update-card refund and persist its new authorization."""
+    subscription = await find_subscription(db, subscription_code)
+    if not subscription:
+        return
+
+    try:
+        response = await fetch_subscription(subscription_code)
+    except Exception:
+        # The refund webhook must still be acknowledged. A later webhook or
+        # reconciliation pass can refresh the payment details if Paystack is
+        # temporarily unavailable here.
+        return
+
+    remote = response.get("data") or {}
+    update_payment_details(subscription, remote)
+    subscription.updated_at = now_utc()
+    await db.commit()
+
+
 async def handle_subscription_not_renew(
     db: AsyncSession,
     data: dict,
@@ -80,10 +123,7 @@ async def handle_subscription_not_renew(
         user.subscription_ends_at = next_payment_date
 
     # Paystack includes the current authorization on subscription.not_renew.
-    # This is important for the update-payment-method flow: the preceding
-    # refund.pending event belongs to the temporary update-card charge and does
-    # not contain the new authorization. Persist the authorization from the
-    # subscription event instead.
+    # Persist it because this event can follow an update-card operation.
     update_payment_details(subscription, data)
 
     subscription.status = "non_renewing"
@@ -111,10 +151,6 @@ async def handle_subscription_disable(
     if not user:
         return
 
-    # Keep any authorization/payment details Paystack supplied with the event.
-    # The subscription is no longer active, but those fields are useful for
-    # historical display and should not be confused with the active recurring
-    # subscription identifiers below.
     update_payment_details(subscription, data)
 
     subscription.status = "canceled"
@@ -145,10 +181,14 @@ async def apply_webhook_event(db: AsyncSession, event: str, data: dict) -> None:
         return
 
     if event.startswith("refund."):
-        # Refund events are payment/refund lifecycle events, not subscription
-        # lifecycle events. In particular, refund.pending is emitted by
-        # Paystack during the update-payment-method flow. It must never cancel,
-        # downgrade, or otherwise mutate the user's active subscription.
+        # Paystack's hosted update-card flow creates a small verification charge
+        # and immediately refunds it. The refund payload itself does not carry
+        # the new authorization, but its merchant/customer note identifies the
+        # subscription. Fetch that subscription so the new authorization is
+        # persisted locally, while leaving subscription lifecycle state alone.
+        subscription_code = extract_subscription_code_from_refund(data)
+        if subscription_code:
+            await refresh_payment_details_from_paystack(db, subscription_code)
         return
 
     await apply_subscription_event(db, event, data)
