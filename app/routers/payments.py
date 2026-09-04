@@ -641,7 +641,7 @@ async def verify_payment(
         currency=data.get("currency"),
         status="success",
         channel=channel or None,
-        billing_type="reoccurring" if channel in ("card", "direct_debit") else "onetime",
+        billing_type="reoccuring" if channel in ("card", "direct_debit") else "onetime",
         payment_method="recurring" if recurring else "one_time",
         event=subscription.last_event,
         paid_at=paid_at,
@@ -678,6 +678,14 @@ async def manage_subscription(
     payment_channel = metadata.get("payment_channel", "unknown")
     recurring = bool(metadata.get("recurring")) and bool(subscription.paystack_subscription_code)
 
+    payment_method_details = {
+        "method": subscription.payment_method,
+        "brand": subscription.payment_method_brand,
+        "last4": subscription.payment_method_last4,
+        "bank": subscription.payment_method_bank,
+        "card_type": subscription.payment_method_card_type,
+    }
+
     if not recurring:
         subscription_end = ensure_utc(current_user.subscription_ends_at)
         if subscription_end and current_user.subscription_ends_at != subscription_end:
@@ -699,6 +707,7 @@ async def manage_subscription(
             "interval": interval,
             "payment_method": "one_time",
             "payment_channel": payment_channel,
+            "payment_method_details": payment_method_details,
             "subscription_ends_at": subscription_end,
             "can_cancel": False,
             "can_renew": can_renew,
@@ -760,6 +769,7 @@ async def manage_subscription(
         "interval": interval,
         "payment_method": "recurring",
         "payment_channel": payment_channel,
+        "payment_method_details": payment_method_details,
         "subscription_status": current_user.subscription_status,
         "subscription_ends_at": ensure_utc(current_user.subscription_ends_at),
         "subscription_code": subscription_code,
