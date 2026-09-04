@@ -128,14 +128,14 @@ class PaymentHistoryItem(BaseModel):
     provider_reference: str
     billing_type: str
     method: str | None = None
+    method_brand: str | None = None
+    method_last4: str | None = None
     reference: str
     plan: str
     interval: str | None = None
     amount: int | None = None
     currency: str = "NGN"
     status: str
-    channel: str | None = None
-    payment_method: str | None = None
     event: str
     paid_at: datetime | None = None
     created_at: datetime
