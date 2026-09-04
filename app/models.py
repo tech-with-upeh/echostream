@@ -17,7 +17,7 @@ class DBAudioAsset(Base):
 
 
 class DBUserSession(Base):
-    __tablename__="user_sessions"; id=Column(String,primary_key=True); user_id=Column(Integer,ForeignKey("users.id",ondelete="CASCADE"),nullable=False,index=True); created_at=Column(UTCDateTime,nullable=False); last_used_at=Column(UTCDateTime,nullable=False); revoked_at=Column(UTCDateTime,nullable=True,index=True); user=relationship("DBUser",back_populates="sessions"); refresh_tokens=relationship("DBRefreshToken",back_populates="session",cascade="all, delete-orphan")
+    __tablename__="user_sessions"; id=Column(String,primary_key=True); user_id=Column(Integer,ForeignKey("users.id",ondelete="CASCADE"),nullable=False,index=True); created_at=Column(UTCDateTime,nullable=False); last_used_at=Column(UTCDateTime,nullable=False); revoked_at=Column(UTCDateTime,nullable=True,index=True); user=relationship("DBUser",back_populates="sessions"); refresh_tokens=relationship("DBRefreshToken",back_populates="user_sessions")
 
 
 class DBRefreshToken(Base):
@@ -37,7 +37,7 @@ class DBSubscription(Base):
 
 
 class DBPaymentHistory(Base):
-    __tablename__="payment_history"; __table_args__=(UniqueConstraint("reference"), UniqueConstraint("payment_id"), UniqueConstraint("receipt_number")); id=Column(Integer,primary_key=True,index=True); user_id=Column(Integer,ForeignKey("users.id",ondelete="CASCADE"),nullable=False,index=True); subscription_id=Column(Integer,ForeignKey("subscriptions.id",ondelete="SET NULL"),nullable=True,index=True); payment_id=Column(String,nullable=False,index=True); receipt_number=Column(String,nullable=False,index=True); provider=Column(String,nullable=False,default="paystack"); provider_reference=Column(String,nullable=False); billing_type=Column(String,nullable=False,default="unknown"); method=Column(String,nullable=True); reference=Column(String,nullable=False,index=True); plan=Column(String,nullable=False); interval=Column(String,nullable=True); amount=Column(Integer,nullable=True); currency=Column(String,nullable=False,default="NGN"); status=Column(String,nullable=False); channel=Column(String,nullable=True); payment_method=Column(String,nullable=True); event=Column(String,nullable=False); paid_at=Column(UTCDateTime,nullable=True); created_at=Column(UTCDateTime,nullable=False); user=relationship("DBUser",back_populates="payment_history")
+    __tablename__="payment_history"; __table_args__=(UniqueConstraint("reference"), UniqueConstraint("payment_id"), UniqueConstraint("receipt_number")); id=Column(Integer,primary_key=True,index=True); user_id=Column(Integer,ForeignKey("users.id",ondelete="CASCADE"),nullable=False,index=True); subscription_id=Column(Integer,ForeignKey("subscriptions.id",ondelete="SET NULL"),nullable=True,index=True); payment_id=Column(String,nullable=False,index=True); receipt_number=Column(String,nullable=False,index=True); provider=Column(String,nullable=False,default="paystack"); provider_reference=Column(String,nullable=False); billing_type=Column(String,nullable=False,default="unknown"); method=Column(String,nullable=True); method_brand=Column(String,nullable=True); method_last4=Column(String,nullable=True); reference=Column(String,nullable=False,index=True); plan=Column(String,nullable=False); interval=Column(String,nullable=True); amount=Column(Integer,nullable=True); currency=Column(String,nullable=False,default="NGN"); status=Column(String,nullable=False); event=Column(String,nullable=False); paid_at=Column(UTCDateTime,nullable=True); created_at=Column(UTCDateTime,nullable=False); user=relationship("DBUser",back_populates="payment_history")
 
 
 @event.listens_for(DBPaymentHistory, "before_insert")
@@ -51,10 +51,7 @@ def populate_payment_identity(mapper, connection, target):
     if not target.provider_reference and target.reference:
         target.provider_reference = target.reference
     if not target.billing_type:
-        target.billing_type = target.payment_method or "unknown"
-    if not target.method:
-        channel = (target.channel or "").lower()
-        target.method = channel if channel in {"card", "bank", "bank_transfer", "ussd", "qr", "mobile_money"} else None
+        target.billing_type = "unknown"
 
 
 class DBUserPreferences(Base):
@@ -70,7 +67,7 @@ class DBGiftCatalogSync(Base):
 
 
 class DBGiftPreference(Base):
-    __tablename__="gift_preferences"; id=Column(Integer,primary_key=True,index=True); owner_id=Column(Integer,ForeignKey("users.id",ondelete="CASCADE"),nullable=False,index=True); gift_id=Column(String,nullable=False); gift_name=Column(String,nullable=False,default=""); enabled=Column(Boolean,nullable=False,default=True); alert_type=Column(String,nullable=False,default="tts"); tts_template=Column(String,nullable=True); tts_provider=Column(String,nullable=True); voice=Column(String,nullable=True); fish_voice_id=Column(String,nullable=True); fish_model=Column(String,nullable=True); system_sound_id=Column(String,nullable=True); custom_audio_id=Column(Integer,ForeignKey("audio_assets.id",ondelete="SET NULL"),nullable=True); custom_audio_url=Column(String,nullable=True); volume=Column(Integer,nullable=True); speed=Column(Integer,nullable=True); pitch=Column(String,nullable=True); owner=relationship("DBUser",back_populates="gift_preferences"); custom_audio=relationship("DBAudioAsset",foreign_keys=[custom_audio_id])
+    __tablename__="gift_preferences"; __table_args__=(UniqueConstraint("owner_id","gift_id"),); id=Column(Integer,primary_key=True,index=True); owner_id=Column(Integer,ForeignKey("users.id",ondelete="CASCADE"),nullable=False,index=True); gift_id=Column(String,nullable=False); gift_name=Column(String,nullable=False,default=""); enabled=Column(Boolean,nullable=False,default=True); alert_type=Column(String,nullable=False,default="tts"); tts_template=Column(String,nullable=True); tts_provider=Column(String,nullable=True); voice=Column(String,nullable=True); fish_voice_id=Column(String,nullable=True); fish_model=Column(String,nullable=True); system_sound_id=Column(String,nullable=True); custom_audio_id=Column(Integer,ForeignKey("audio_assets.id",ondelete="SET NULL"),nullable=True); custom_audio_url=Column(String,nullable=True); volume=Column(Integer,nullable=True); speed=Column(Integer,nullable=True); pitch=Column(String,nullable=True); owner=relationship("DBUser",back_populates="gift_preferences"); custom_audio=relationship("DBAudioAsset",foreign_keys=[custom_audio_id])
 
 
 class DBFishVoice(Base):
