@@ -8,6 +8,7 @@ from app.live_runtime import command_listener, owner_heartbeat
 from app.rate_limit import RedisRateLimitMiddleware
 from app.redis_store import close_redis, ping_redis
 from app.routers import auth, gifts, live, payments, payment_receipts, payment_reconciliation, prefrences, subscription_changes, voice, wstts, sounds
+from app.routers import paystack_webhook
 import app.models
 
 
@@ -39,7 +40,7 @@ app.add_middleware(
     ],
     allow_credentials=True,
     allow_methods=["*"],
-    allow_headers=["*"],
+    allow_headers=["*"] ,
 )
 
 app.add_middleware(RedisRateLimitMiddleware)
@@ -54,6 +55,9 @@ app.include_router(sounds.router)
 # Register reconciliation routes first so callback/verify use Paystack subscription
 # reconciliation instead of relying on the webhook payload's subscription_code.
 app.include_router(payment_reconciliation.router)
+# Register the dedicated Paystack webhook before payments.router. Both expose
+# /payments/webhook, and FastAPI resolves the first matching route.
+app.include_router(paystack_webhook.router)
 app.include_router(payments.router)
 app.include_router(payment_receipts.router)
 app.include_router(subscription_changes.router)
