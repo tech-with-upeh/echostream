@@ -29,7 +29,6 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(mess
 logger = logging.getLogger("backfill_payment_history")
 
 PER_PAGE = 50
-# Small delay between paginated Paystack calls to stay well under rate limits.
 REQUEST_DELAY_SECONDS = 0.3
 
 
@@ -50,8 +49,7 @@ def _parse_paystack_datetime(value: Any) -> datetime | None:
 
 
 def _build_plan_code_lookup() -> dict[str, tuple[str, str]]:
-    """Map every configured Paystack plan_code -> (plan, interval), so
-    historical transactions can be classified the same way live ones are."""
+    """Map every configured Paystack plan_code -> (plan, interval)."""
     lookup: dict[str, tuple[str, str]] = {}
     pairs = [
         (settings.PAYSTACK_ESSENTIAL_MONTHLY_PLAN_CODE, "essential", "month"),
@@ -82,17 +80,14 @@ def _classify_transaction(
         return plan, interval, "recurring"
 
     if plan_code:
-        # A plan code Paystack knows about but we don't have configured
-        # locally anymore (e.g. a retired plan) - still recurring.
         return fallback_plan, fallback_interval, "recurring"
 
     return fallback_plan, fallback_interval, "one_time"
 
 
 async def _resolve_customer_id(customer_code: str) -> int:
-    """Paystack's GET /transaction?customer= filter takes a numeric customer
-    ID, not the CUS_xxx customer code - passing the code silently matches
-    nothing (still HTTP 200 with an empty list). Resolve it first."""
+    """Resolve a Paystack customer code to the numeric customer id required
+    by Paystack's transaction customer filter."""
     response = await fetch_customer(customer_code)
     customer = response.get("data") or {}
     customer_id = customer.get("id")
@@ -102,13 +97,16 @@ async def _resolve_customer_id(customer_code: str) -> int:
 
 
 async def _fetch_all_transactions(customer_code: str) -> list[dict[str, Any]]:
+    """Fetch every transaction for a customer, regardless of status."""
     customer_id = await _resolve_customer_id(customer_code)
     transactions: list[dict[str, Any]] = []
     page = 1
+
     while True:
+        # Do NOT pass status="success" here. Paystack's transaction endpoint
+        # otherwise filters the historical dataset to successful payments only.
         result = await list_transactions(
             customer=customer_id,
-            status="success",
             page=page,
             per_page=PER_PAGE,
         )
@@ -161,14 +159,18 @@ async def backfill_subscription(
         paid_at = _parse_paystack_datetime(txn.get("paid_at")) or _parse_paystack_datetime(
             txn.get("created_at")
         )
+        transaction_status = str(txn.get("status") or "unknown").lower()
+        channel = str(txn.get("channel") or "").lower() or None
 
         if dry_run:
             logger.info(
-                "[dry-run] would insert user_id=%s reference=%s plan=%s/%s amount=%s",
+                "[dry-run] would insert user_id=%s reference=%s status=%s plan=%s/%s method=%s amount=%s",
                 subscription.user_id,
                 reference,
+                transaction_status,
                 plan,
                 interval,
+                payment_method,
                 txn.get("amount"),
             )
             inserted += 1
@@ -184,9 +186,10 @@ async def backfill_subscription(
                 interval=interval,
                 amount=txn.get("amount"),
                 currency=(txn.get("currency") or "NGN").upper(),
-                status="success",
-                channel=txn.get("channel"),
+                status=transaction_status,
+                channel=channel,
                 payment_method=payment_method,
+                billing_type=payment_method,
                 event="backfill",
                 paid_at=paid_at,
                 created_at=_utcnow(),
@@ -219,7 +222,6 @@ async def run(dry_run: bool = False, user_id: int | None = None) -> None:
     total_inserted = 0
     for subscription in subscriptions:
         async with AsyncSessionLocal() as db:
-            # Re-attach within this session's identity map.
             subscription = await db.get(DBSubscription, subscription.id)
             seen, inserted = await backfill_subscription(db, subscription, plan_lookup, dry_run)
         total_seen += seen
