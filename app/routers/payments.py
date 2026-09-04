@@ -121,6 +121,7 @@ async def record_payment_history(
     status: str,
     channel: str | None,
     payment_method: str | None,
+    billing_type: str | None,
     event: str,
     paid_at: datetime | None,
 ) -> None:
@@ -140,11 +141,12 @@ async def record_payment_history(
         reference=reference,
         plan=plan,
         interval=interval,
-        amount=amount_int,
+        amount=amount_int/100,
         currency=(currency or "NGN").upper(),
         status=status,
         channel=channel,
         payment_method=payment_method,
+        billing_type=billing_type,
         event=event,
         paid_at=paid_at,
         created_at=now_utc(),
@@ -227,7 +229,7 @@ async def finalize_pending_change(
     await db.flush()
     subscription.paystack_subscription_code = new_subscription_code
     subscription.plan = pending_plan
-    subscription.status = "active"
+    subscription.status = "active" if data.get("status") == "success" else "failed" 
     subscription.cancel_at_period_end = False
     subscription.last_event = "subscription.change.finalized"
 
@@ -247,10 +249,7 @@ async def finalize_pending_change(
     user.subscription_status = "active"
     update_subscription_period(user, subscription, data)
     subscription.updated_at = now_utc()
-
-    authorization = data.get("authorization") or {}
-    if authorization.get("authorization_code"):
-        subscription.authorization_code = authorization["authorization_code"]
+    subscription.authorization_code = data.get('authorization', {}).get('authorization_code')
 
     customer = data.get("customer") or {}
     if customer.get("customer_code"):
@@ -278,9 +277,10 @@ async def apply_subscription_event(db: AsyncSession, event: str, data: dict) -> 
             interval=get_metadata(subscription).get("interval"),
             amount=data.get("amount"),
             currency=data.get("currency"),
-            status="success",
+            status=data.get("status"),
             channel=data.get("channel"),
-            payment_method="recurring",
+            payment_method=data.get("channel"),
+            billing_type= "reoccuring" if data.get("channel") in ("card", "direct_debit") else "one_time",
             event=event,
             paid_at=parse_paystack_datetime(data.get("paid_at")) or now_utc(),
         )
@@ -367,9 +367,10 @@ async def apply_subscription_event(db: AsyncSession, event: str, data: dict) -> 
             interval=get_metadata(subscription).get("interval"),
             amount=data.get("amount"),
             currency=data.get("currency"),
-            status="success",
+            status=data.get("status"),
             channel=data.get("channel"),
-            payment_method="recurring",
+            payment_method=data.get("channel"),
+            billing_type= "reoccuring" if data.get("channel") in ("card", "direct_debit") else "one_time",
             event=event,
             paid_at=parse_paystack_datetime(data.get("paid_at")) or now_utc(),
         )
@@ -415,6 +416,7 @@ async def create_subscription_checkout(
 
     reference = f"echostream_{current_user.id}_{uuid.uuid4().hex}"
     try:
+        print(">>>>>>>>>>>>>>>>>>>>>>>>>>>",settings.PAYSTACK_CALLBACK_URL, get_plan_code(plan=plan, interval=interval))
         result = await initialize_transaction(
             email=current_user.email,
             plan_code=get_plan_code(plan, interval),
@@ -639,6 +641,7 @@ async def verify_payment(
         currency=data.get("currency"),
         status="success",
         channel=channel or None,
+        billing_type="reoccurring" if channel in ("card", "direct_debit") else "onetime",
         payment_method="recurring" if recurring else "one_time",
         event=subscription.last_event,
         paid_at=paid_at,
@@ -822,6 +825,7 @@ async def paystack_webhook(request: Request, db: AsyncSession = Depends(get_db))
     except (UnicodeDecodeError, json.JSONDecodeError) as exc:
         raise HTTPException(status_code=400, detail="Invalid webhook payload") from exc
 
+    print(">>>>>>>>>>>>>>", payload)
     try:
         await apply_subscription_event(db, payload.get("event", ""), payload.get("data") or {})
     except Exception:

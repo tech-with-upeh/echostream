@@ -238,6 +238,12 @@ async def create_subscription(
     )
 
 
+async def list_subscr() -> dict[str, Any]:
+    return await paystack_request(
+        "GET",
+        "/subscription",
+    )
+
 async def fetch_subscription(subscription_code: str) -> dict[str, Any]:
     return await paystack_request(
         "GET",
