@@ -1,12 +1,11 @@
 """Backfill payment_history from Paystack transaction history.
 
 The transaction history is the primary source for payment attempts. Paystack
-subscription records are used only to correlate recurring authorizations when
-the transaction metadata does not contain enough billing information.
+subscription records are used to correlate recurring authorizations when the
+transaction itself does not contain enough billing information.
 
-Safe to re-run: payment references are unique. Existing one_time rows can be
-upgraded to recurring when Paystack subscription data proves the transaction
-used a recurring authorization.
+Safe to re-run: payment references are unique. Existing rows can be corrected
+when Paystack subscription data proves that a transaction is recurring.
 
 Usage:
     python -m scripts.backfill_payment_history
@@ -40,6 +39,7 @@ logger = logging.getLogger("backfill_payment_history")
 PER_PAGE = 50
 REQUEST_DELAY_SECONDS = 0.3
 VALID_INTERVALS = {"month", "year"}
+VALID_METHODS = {"card", "bank", "bank_transfer", "ussd", "qr", "mobile_money"}
 
 
 def _utcnow() -> datetime:
@@ -72,7 +72,7 @@ def _metadata(txn: dict[str, Any]) -> dict[str, Any]:
 
 
 def _subscription_interval(subscription: DBSubscription) -> str | None:
-    """Recover interval from the local subscription metadata as a last resort."""
+    """Recover the interval from local subscription metadata as a last resort."""
     if not subscription.metadata_json:
         return None
     try:
@@ -86,10 +86,10 @@ def _subscription_interval(subscription: DBSubscription) -> str | None:
 
 
 def _map_paystack_interval(value: Any) -> str | None:
-    """Map Paystack's interval names to EchoStream's month/year values."""
+    """Map Paystack interval names to EchoStream's month/year values."""
     if value == "annually":
         return "year"
-    if value in {"hourly", "daily", "weekly", "monthly", "quarterly", "biannually"}:
+    if value == "monthly":
         return "month"
     return None
 
@@ -195,32 +195,44 @@ def _classify_transaction(
     fallback_plan: str,
     fallback_interval: str | None,
 ) -> tuple[str, str | None, str]:
-    """Return (plan, interval, billing_type)."""
+    """Return (plan, interval, billing_type).
+
+    Billing type is determined by whether the transaction belongs to a
+    subscription, not by its payment channel or transaction status. In
+    particular, a recurring subscription may have a card or bank channel and
+    may have success/failed/abandoned/cancelled transaction statuses.
+    """
     metadata = _metadata(txn)
     metadata_plan = metadata.get("plan")
     metadata_interval = metadata.get("interval")
 
-    # Newer EchoStream transactions carry the plan/interval we requested.
-    # This is the preferred classification because the transaction itself
-    # preserves exactly what the customer attempted to purchase.
-    if metadata_plan:
-        interval = metadata_interval if metadata_interval in VALID_INTERVALS else None
-        return str(metadata_plan), interval, "recurring" if interval else "one_time"
-
-    # Paystack's transaction response can have an empty `plan` object even
-    # when the authorization belongs to a real subscription. Correlate the
-    # authorization with Paystack's subscription records before falling back.
+    # First correlate the authorization with an actual Paystack subscription.
+    # This MUST happen before using incomplete metadata: older transactions
+    # can contain metadata.plan without metadata.interval, while their
+    # authorization still proves that they belong to a recurring subscription.
     authorization = txn.get("authorization") or {}
-    auth_code = authorization.get("authorization_code") if isinstance(authorization, dict) else None
+    auth_code = (
+        authorization.get("authorization_code")
+        if isinstance(authorization, dict)
+        else None
+    )
     if auth_code and auth_code in recurring_map:
         mapped_plan, mapped_interval = recurring_map[auth_code]
         return (
-            mapped_plan or fallback_plan,
-            mapped_interval or fallback_interval,
+            str(metadata_plan or mapped_plan or fallback_plan),
+            metadata_interval
+            if metadata_interval in VALID_INTERVALS
+            else (mapped_interval or fallback_interval),
             "recurring",
         )
 
-    # Finally, use an explicit plan object if Paystack supplied one.
+    # Complete EchoStream subscription metadata is also enough to classify
+    # the transaction, including failed/abandoned attempts made against a
+    # recurring plan that never produced an authorization code.
+    if metadata_plan and metadata_interval in VALID_INTERVALS:
+        return str(metadata_plan), metadata_interval, "recurring"
+
+    # Paystack may provide a plan object on some transaction responses.
     plan_obj = txn.get("plan") or {}
     if isinstance(plan_obj, dict) and plan_obj:
         plan_code = plan_obj.get("plan_code")
@@ -228,9 +240,12 @@ def _classify_transaction(
             plan, interval = plan_lookup[plan_code]
             return plan, interval, "recurring"
         if plan_code:
-            return fallback_plan, fallback_interval, "recurring"
+            return str(metadata_plan or fallback_plan), fallback_interval, "recurring"
 
-    return fallback_plan, fallback_interval, "one_time"
+    # A plan name by itself is not enough to call a transaction recurring.
+    # It can exist on legacy/one-time metadata without the interval or a
+    # matching Paystack subscription.
+    return str(metadata_plan or fallback_plan), None, "one_time"
 
 
 def _transaction_user_id(txn: dict[str, Any]) -> int | None:
@@ -240,6 +255,12 @@ def _transaction_user_id(txn: dict[str, Any]) -> int | None:
         return int(value) if value is not None else None
     except (TypeError, ValueError):
         return None
+
+
+def _transaction_method(txn: dict[str, Any]) -> str | None:
+    """Return the actual payment channel/method, separate from billing type."""
+    channel = str(txn.get("channel") or "").lower()
+    return channel if channel in VALID_METHODS else None
 
 
 async def backfill_subscription(
@@ -297,16 +318,19 @@ async def backfill_subscription(
         created_at = _parse_paystack_datetime(txn.get("created_at"))
         paid_at = _parse_paystack_datetime(txn.get("paid_at"))
         channel = str(txn.get("channel") or "").lower() or None
+        method = _transaction_method(txn)
 
         if dry_run:
             logger.info(
-                "[dry-run] user_id=%s reference=%s status=%s plan=%s interval=%s billing_type=%s amount=%s created_at=%s paid_at=%s",
+                "[dry-run] user_id=%s reference=%s status=%s plan=%s interval=%s billing_type=%s channel=%s method=%s amount=%s created_at=%s paid_at=%s",
                 subscription.user_id,
                 reference,
                 status,
                 plan,
                 interval,
                 billing_type,
+                channel,
+                method,
                 txn.get("amount"),
                 created_at,
                 paid_at,
@@ -324,7 +348,8 @@ async def backfill_subscription(
             currency=(txn.get("currency") or "NGN").upper(),
             status=status,
             channel=channel,
-            payment_method=billing_type,
+            method=method,
+            payment_method=method,
             billing_type=billing_type,
             event="backfill",
             paid_at=paid_at,
@@ -341,13 +366,14 @@ async def backfill_subscription(
                 "amount": stmt.excluded.amount,
                 "currency": stmt.excluded.currency,
                 "channel": stmt.excluded.channel,
+                "method": stmt.excluded.method,
                 "payment_method": stmt.excluded.payment_method,
                 "billing_type": stmt.excluded.billing_type,
                 "paid_at": stmt.excluded.paid_at,
             },
             where=(
-                (DBPaymentHistory.payment_method == "one_time")
-                & (stmt.excluded.payment_method == "recurring")
+                (DBPaymentHistory.billing_type == "one_time")
+                & (stmt.excluded.billing_type == "recurring")
             ),
         )
         result = await db.execute(stmt)
