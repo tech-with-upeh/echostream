@@ -1,3 +1,4 @@
+import asyncio
 import json
 import uuid
 from datetime import datetime, timezone
@@ -11,13 +12,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.config import settings
 from app.dependencies import get_current_user, get_db
 from app.models import DBPaymentHistory, DBSubscription, DBUser
-from app.paystack_service import (
-    PaystackError,
-    fetch_customer_subscriptions_by_code,
-    fetch_subscription,
-    get_plan_code,
-    verify_transaction,
-)
+from app.paystack_service import PaystackError, fetch_customer_subscriptions_by_code, fetch_subscription, get_plan_code, verify_transaction
 
 router = APIRouter(prefix="/payments", tags=["Payments"])
 PAID_PLANS = {"essential", "pro"}
@@ -93,12 +88,7 @@ async def _find_local_subscription(db: AsyncSession, reference: str, user_id: in
     if subscription:
         return subscription
     if user_id is not None:
-        result = await db.execute(
-            select(DBSubscription).where(
-                DBSubscription.user_id == user_id,
-                DBSubscription.metadata_json.like(f'%"pending_change_reference": "{reference}"%'),
-            )
-        )
+        result = await db.execute(select(DBSubscription).where(DBSubscription.user_id == user_id, DBSubscription.metadata_json.like(f'%"pending_change_reference": "{reference}"%')))
         return result.scalar_one_or_none()
     return None
 
@@ -106,42 +96,43 @@ async def _find_local_subscription(db: AsyncSession, reference: str, user_id: in
 async def _find_paystack_subscription(customer_code: str | None, authorization_code: str | None, plan: str | None, interval: str | None) -> tuple[dict | None, str | None]:
     if not customer_code:
         return None, None
-    try:
-        result = await fetch_customer_subscriptions_by_code(customer_code)
-    except PaystackError:
-        return None, None
-
-    subscriptions = result.get("data") or []
-    candidates = []
-    target_plan_code = None
-    if plan in PAID_PLANS and interval in VALID_INTERVALS:
+    for attempt in range(2):
         try:
-            target_plan_code = get_plan_code(plan, interval)
+            result = await fetch_customer_subscriptions_by_code(customer_code)
         except PaystackError:
-            pass
-
-    for item in subscriptions:
-        if not isinstance(item, dict):
-            continue
-        if str(item.get("status", "")).lower() not in {"active", "non-renewing"}:
-            continue
-        auth = item.get("authorization") or {}
-        item_auth = auth.get("authorization_code") if isinstance(auth, dict) else None
-        item_plan = item.get("plan") or {}
-        item_plan_code = item_plan.get("plan_code") if isinstance(item_plan, dict) else None
-        score = 0
-        if authorization_code and item_auth == authorization_code:
-            score += 100
-        if target_plan_code and item_plan_code == target_plan_code:
-            score += 50
-        if score:
-            candidates.append((score, item))
-
-    if not candidates:
-        return None, None
-    candidates.sort(key=lambda value: value[0], reverse=True)
-    selected = candidates[0][1]
-    return selected, selected.get("subscription_code")
+            result = None
+        if result is not None:
+            subscriptions = result.get("data") or []
+            candidates = []
+            target_plan_code = None
+            if plan in PAID_PLANS and interval in VALID_INTERVALS:
+                try:
+                    target_plan_code = get_plan_code(plan, interval)
+                except PaystackError:
+                    pass
+            for item in subscriptions:
+                if not isinstance(item, dict):
+                    continue
+                if str(item.get("status", "")).lower() not in {"active", "non-renewing"}:
+                    continue
+                auth = item.get("authorization") or {}
+                item_auth = auth.get("authorization_code") if isinstance(auth, dict) else None
+                item_plan = item.get("plan") or {}
+                item_plan_code = item_plan.get("plan_code") if isinstance(item_plan, dict) else None
+                score = 0
+                if authorization_code and item_auth == authorization_code:
+                    score += 100
+                if target_plan_code and item_plan_code == target_plan_code:
+                    score += 50
+                if score:
+                    candidates.append((score, item))
+            if candidates:
+                candidates.sort(key=lambda value: value[0], reverse=True)
+                selected = candidates[0][1]
+                return selected, selected.get("subscription_code")
+        if attempt == 0:
+            await asyncio.sleep(0.5)
+    return None, None
 
 
 async def _sync_transaction(db: AsyncSession, data: dict, local_subscription: DBSubscription | None, user: DBUser) -> tuple[bool, str | None]:
@@ -152,14 +143,17 @@ async def _sync_transaction(db: AsyncSession, data: dict, local_subscription: DB
     customer_code = customer.get("customer_code") if isinstance(customer, dict) else None
     authorization_code = authorization.get("authorization_code") if isinstance(authorization, dict) else None
 
-    paystack_subscription, subscription_code = await _find_paystack_subscription(
-        customer_code,
-        authorization_code,
-        plan,
-        interval,
-    )
+    paystack_subscription, subscription_code = await _find_paystack_subscription(customer_code, authorization_code, plan, interval)
 
+    # The Paystack subscription lookup is the strongest evidence. If the
+    # subscription has not propagated yet, the checkout itself is still
+    # explicitly marked as a new_subscription and carries a paid plan/interval.
+    # Keep it recurring rather than incorrectly converting a bank/direct-debit
+    # subscription to one-time while Paystack catches up.
     recurring = bool(paystack_subscription and subscription_code)
+    if not recurring and metadata.get("purpose") == "new_subscription" and plan in PAID_PLANS and interval in VALID_INTERVALS:
+        recurring = True
+
     if not plan and local_subscription:
         plan = local_subscription.plan
     if plan not in PAID_PLANS:
@@ -167,7 +161,6 @@ async def _sync_transaction(db: AsyncSession, data: dict, local_subscription: DB
 
     if interval not in VALID_INTERVALS:
         interval = _interval_from_plan((paystack_subscription or {}).get("plan") or {})
-
     if not interval:
         interval = metadata.get("interval") if metadata.get("interval") in VALID_INTERVALS else None
 
@@ -305,7 +298,7 @@ async def payment_callback(reference: str | None = None, trxref: str | None = No
         return RedirectResponse(url=f"{settings.FRONTEND_URL}/payment/failed?reference={payment_reference}")
 
     try:
-        data, recurring, _ = await _verify_and_sync(db, payment_reference, user)
+        data, _, _ = await _verify_and_sync(db, payment_reference, user)
     except HTTPException:
         return RedirectResponse(url=f"{settings.FRONTEND_URL}/payment/failed?reference={payment_reference}")
 
