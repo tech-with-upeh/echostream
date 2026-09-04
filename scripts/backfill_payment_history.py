@@ -39,7 +39,7 @@ logger = logging.getLogger("backfill_payment_history")
 PER_PAGE = 50
 REQUEST_DELAY_SECONDS = 0.3
 VALID_INTERVALS = {"month", "year"}
-VALID_METHODS = {"card", "bank", "bank_transfer", "ussd", "qr", "mobile_money"}
+
 
 
 def _utcnow() -> datetime:
@@ -223,7 +223,7 @@ def _classify_transaction(
             metadata_interval
             if metadata_interval in VALID_INTERVALS
             else (mapped_interval or fallback_interval),
-            "recurring",
+            "onn",
         )
 
     # Complete EchoStream subscription metadata is also enough to classify
@@ -260,7 +260,7 @@ def _transaction_user_id(txn: dict[str, Any]) -> int | None:
 def _transaction_method(txn: dict[str, Any]) -> str | None:
     """Return the actual payment channel/method, separate from billing type."""
     channel = str(txn.get("channel") or "").lower()
-    return channel if channel in VALID_METHODS else None
+    return channel
 
 
 async def backfill_subscription(
@@ -306,6 +306,7 @@ async def backfill_subscription(
             )
             continue
 
+        
         plan, interval, billing_type = _classify_transaction(
             txn,
             recurring_map,
@@ -319,6 +320,7 @@ async def backfill_subscription(
         paid_at = _parse_paystack_datetime(txn.get("paid_at"))
         channel = str(txn.get("channel") or "").lower() or None
         method = _transaction_method(txn)
+        billing_type = "reoccuring" if method in ("card", "direct_debit") else "one_time" 
 
         if dry_run:
             logger.info(
