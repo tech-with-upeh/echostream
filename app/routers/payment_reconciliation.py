@@ -155,14 +155,16 @@ async def _disable_previous_paystack_subscription(subscription_code: str | None)
         pass
 
 
-def _payment_method_details(data: dict) -> tuple[str | None, str | None, str | None]:
+def _payment_method_details(data: dict) -> tuple[str | None, str | None, str | None, str | None, str | None]:
     authorization = data.get("authorization") or {}
     if not isinstance(authorization, dict):
         authorization = {}
     method = str(data.get("channel") or authorization.get("channel") or "").lower().strip() or None
     brand = str(authorization.get("brand") or authorization.get("card_type") or "").strip() or None
     last4 = str(authorization.get("last4") or "").strip() or None
-    return method, brand, last4
+    bank = str(authorization.get("bank") or "").strip() or None
+    card_type = str(authorization.get("card_type") or "").strip() or None
+    return method, brand, last4, bank, card_type
 
 
 async def _sync_transaction(db: AsyncSession, data: dict, local_subscription: DBSubscription | None, user: DBUser) -> tuple[bool, str | None]:
@@ -172,7 +174,7 @@ async def _sync_transaction(db: AsyncSession, data: dict, local_subscription: DB
     authorization = data.get("authorization") or {}
     customer_code = customer.get("customer_code") if isinstance(customer, dict) else None
     authorization_code = authorization.get("authorization_code") if isinstance(authorization, dict) else None
-    channel, method_brand, method_last4 = _payment_method_details(data)
+    channel, method_brand, method_last4, method_bank, method_card_type = _payment_method_details(data)
     status_value = str(data.get("status") or "unknown").lower()
     paid_at = _parse_dt(data.get("paid_at")) or _parse_dt(data.get("created_at")) or _now()
     paystack_subscription, subscription_code = await _find_paystack_subscription(customer_code, authorization_code, plan, interval)
@@ -199,6 +201,17 @@ async def _sync_transaction(db: AsyncSession, data: dict, local_subscription: DB
         local_subscription.updated_at = _now()
         if customer_code:
             local_subscription.paystack_customer_code = customer_code
+
+        # Keep the subscription's payment fields as the latest successful
+        # authorization snapshot. Failed charges must never overwrite the
+        # currently active payment method.
+        if status_value == "success":
+            local_subscription.payment_method = channel
+            local_subscription.payment_method_brand = method_brand
+            local_subscription.payment_method_last4 = method_last4
+            local_subscription.payment_method_bank = method_bank
+            local_subscription.payment_method_card_type = method_card_type
+
         if recurring:
             local_subscription.paystack_subscription_code = subscription_code
             local_subscription.authorization_code = authorization_code
