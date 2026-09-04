@@ -33,7 +33,7 @@ class DBResetPassVerificationCode(Base):
 
 
 class DBSubscription(Base):
-    __tablename__="subscriptions"; __table_args__=(UniqueConstraint("user_id"),); id=Column(Integer,primary_key=True,index=True); user_id=Column(Integer,ForeignKey("users.id",ondelete="CASCADE"),nullable=False); plan=Column(String,nullable=False); status=Column(String,nullable=False,default="pending"); paystack_customer_code=Column(String,nullable=True,index=True); paystack_subscription_code=Column(String,unique=True,nullable=True,index=True); paystack_email_token=Column(String,nullable=True); authorization_code=Column(String,nullable=True); reference=Column(String,unique=True,nullable=True,index=True); current_period_start=Column(UTCDateTime,nullable=True); current_period_end=Column(UTCDateTime,nullable=True); cancel_at_period_end=Column(Boolean,default=False); last_event=Column(String,nullable=True); metadata_json=Column(Text,nullable=True); created_at=Column(UTCDateTime,nullable=False); updated_at=Column(UTCDateTime,nullable=False); user=relationship("DBUser",back_populates="subscription")
+    __tablename__="subscriptions"; __table_args__=(UniqueConstraint("user_id"),); id=Column(Integer,primary_key=True,index=True); user_id=Column(Integer,ForeignKey("users.id",ondelete="CASCADE"),nullable=False); plan=Column(String,nullable=False); status=Column(String,nullable=False,default="pending"); paystack_customer_code=Column(String,nullable=True,index=True); paystack_subscription_code=Column(String,unique=True,nullable=True,index=True); paystack_email_token=Column(String,nullable=True); authorization_code=Column(String,nullable=True); payment_method=Column(String,nullable=True); payment_method_brand=Column(String,nullable=True); payment_method_last4=Column(String,nullable=True); payment_method_bank=Column(String,nullable=True); payment_method_card_type=Column(String,nullable=True); reference=Column(String,unique=True,nullable=True,index=True); current_period_start=Column(UTCDateTime,nullable=True); current_period_end=Column(UTCDateTime,nullable=True); cancel_at_period_end=Column(Boolean,default=False); last_event=Column(String,nullable=True); metadata_json=Column(Text,nullable=True); created_at=Column(UTCDateTime,nullable=False); updated_at=Column(UTCDateTime,nullable=False); user=relationship("DBUser",back_populates="subscription")
 
 
 class DBPaymentHistory(Base):
@@ -59,7 +59,7 @@ class DBUserPreferences(Base):
 
 
 class DBTikTokGift(Base):
-    __tablename__="tiktok_gifts"; __table_args__=(UniqueConstraint("tiktok_gift_id"),); id=Column(Integer,primary_key=True,index=True); tiktok_gift_id=Column(String,nullable=False,index=True); name=Column(String,nullable=False); diamond_count=Column(Integer,nullable=True); type=Column(Integer,nullable=True); image_url=Column(String,nullable=True); is_active=Column(Boolean,nullable=False,default=True,index=True); created_at=Column(UTCDateTime,nullable=False); updated_at=Column(UTCDateTime,nullable=False)
+    __tablename__="tiktok_gifts"; __table_args__=(UniqueConstraint("tiktok_gift_id"),); id=Column(Integer,primary_key=True,index=True); tiktok_gift_id=Column(Integer,nullable=False,index=True); name=Column(String,nullable=False); diamond_count=Column(Integer,nullable=True); type=Column(Integer,nullable=True); image_url=Column(String,nullable=True); is_active=Column(Boolean,nullable=False,default=True,index=True); created_at=Column(UTCDateTime,nullable=False); updated_at=Column(UTCDateTime,nullable=False)
 
 
 class DBGiftCatalogSync(Base):
