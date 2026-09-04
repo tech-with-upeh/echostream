@@ -17,6 +17,37 @@ def now_utc() -> datetime:
     return datetime.now(timezone.utc)
 
 
+def update_payment_details(subscription: DBSubscription, data: dict) -> None:
+    """Persist the latest Paystack authorization without exposing secrets."""
+    authorization = data.get("authorization") or {}
+    if not isinstance(authorization, dict):
+        return
+
+    authorization_code = authorization.get("authorization_code")
+    if authorization_code:
+        subscription.authorization_code = authorization_code
+
+    method = str(data.get("channel") or authorization.get("channel") or "").strip().lower()
+    if method:
+        subscription.payment_method = method
+
+    brand = str(authorization.get("brand") or "").strip()
+    if brand:
+        subscription.payment_method_brand = brand
+
+    last4 = str(authorization.get("last4") or "").strip()
+    if last4:
+        subscription.payment_method_last4 = last4
+
+    bank = str(authorization.get("bank") or "").strip()
+    if bank:
+        subscription.payment_method_bank = bank
+
+    card_type = str(authorization.get("card_type") or "").strip()
+    if card_type:
+        subscription.payment_method_card_type = card_type
+
+
 async def find_subscription(db: AsyncSession, subscription_code: str | None) -> DBSubscription | None:
     if not subscription_code:
         return None
@@ -48,13 +79,19 @@ async def handle_subscription_not_renew(
         subscription.current_period_end = next_payment_date
         user.subscription_ends_at = next_payment_date
 
+    # Paystack includes the current authorization on subscription.not_renew.
+    # This is important for the update-payment-method flow: the preceding
+    # refund.pending event belongs to the temporary update-card charge and does
+    # not contain the new authorization. Persist the authorization from the
+    # subscription event instead.
+    update_payment_details(subscription, data)
+
     subscription.status = "non_renewing"
     subscription.cancel_at_period_end = True
     subscription.last_event = "subscription.not_renew"
     subscription.updated_at = now_utc()
 
     # The user remains on the paid plan until the current billing period ends.
-    # Do not clear the plan or subscription end date here.
     user.plan = subscription.plan
     user.subscription_status = "active"
 
@@ -73,6 +110,12 @@ async def handle_subscription_disable(
     user = user_result.scalar_one_or_none()
     if not user:
         return
+
+    # Keep any authorization/payment details Paystack supplied with the event.
+    # The subscription is no longer active, but those fields are useful for
+    # historical display and should not be confused with the active recurring
+    # subscription identifiers below.
+    update_payment_details(subscription, data)
 
     subscription.status = "canceled"
     subscription.cancel_at_period_end = False
