@@ -1,16 +1,9 @@
 """Backfill payment_history from Paystack transaction history.
 
-The transaction history is the primary source for payment attempts. Paystack
-subscription records are used to correlate recurring authorizations when the
-transaction itself does not contain enough billing information.
-
-Safe to re-run: payment references are unique. Existing rows can be corrected
-when Paystack subscription data proves that a transaction is recurring.
-
-Usage:
-    python -m scripts.backfill_payment_history
-    python -m scripts.backfill_payment_history --dry-run
-    python -m scripts.backfill_payment_history --user-id 42
+Paystack transaction records are correlated with Paystack subscription records
+so billing type is not inferred from payment channel. Safe to re-run: payment
+references are unique and an existing row is corrected when stronger Paystack
+subscription evidence becomes available.
 """
 
 import argparse
@@ -26,12 +19,7 @@ from sqlalchemy.dialects.postgresql import insert
 from app.config import settings
 from app.database import AsyncSessionLocal
 from app.models import DBPaymentHistory, DBSubscription
-from app.paystack_service import (
-    PaystackError,
-    fetch_customer,
-    fetch_customer_subscriptions_by_code,
-    list_transactions,
-)
+from app.paystack_service import PaystackError, fetch_customer, fetch_customer_subscriptions_by_code, list_transactions
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 logger = logging.getLogger("backfill_payment_history")
@@ -39,7 +27,6 @@ logger = logging.getLogger("backfill_payment_history")
 PER_PAGE = 50
 REQUEST_DELAY_SECONDS = 0.3
 VALID_INTERVALS = {"month", "year"}
-
 
 
 def _utcnow() -> datetime:
@@ -72,7 +59,6 @@ def _metadata(txn: dict[str, Any]) -> dict[str, Any]:
 
 
 def _subscription_interval(subscription: DBSubscription) -> str | None:
-    """Recover the interval from local subscription metadata as a last resort."""
     if not subscription.metadata_json:
         return None
     try:
@@ -86,12 +72,7 @@ def _subscription_interval(subscription: DBSubscription) -> str | None:
 
 
 def _map_paystack_interval(value: Any) -> str | None:
-    """Map Paystack interval names to EchoStream's month/year values."""
-    if value == "annually":
-        return "year"
-    if value == "monthly":
-        return "month"
-    return None
+    return {"annually": "year", "monthly": "month"}.get(value)
 
 
 def _build_plan_code_lookup() -> dict[str, tuple[str, str]]:
@@ -120,71 +101,48 @@ async def _resolve_customer_id(customer_code: str) -> int:
 
 
 async def _fetch_all_transactions(customer_code: str) -> list[dict[str, Any]]:
-    """Fetch every transaction, without filtering by status."""
     customer_id = await _resolve_customer_id(customer_code)
     transactions: list[dict[str, Any]] = []
     page = 1
-
     while True:
-        result = await list_transactions(
-            customer=customer_id,
-            page=page,
-            per_page=PER_PAGE,
-        )
+        result = await list_transactions(customer=customer_id, page=page, per_page=PER_PAGE)
         data = result.get("data") or []
         transactions.extend(item for item in data if isinstance(item, dict))
-
         meta = result.get("meta") or {}
         page_count = meta.get("pageCount") or 1
         if not data or page >= page_count:
             break
         page += 1
         await asyncio.sleep(REQUEST_DELAY_SECONDS)
-
     return transactions
 
 
-async def _build_recurring_authorization_map(
-    customer_code: str,
-    plan_lookup: dict[str, tuple[str, str]],
-) -> dict[str, tuple[str | None, str | None]]:
-    """Map Paystack authorization codes to the subscription plan/interval."""
+async def _build_recurring_authorization_map(customer_code: str, plan_lookup: dict[str, tuple[str, str]]) -> dict[str, tuple[str | None, str | None]]:
+    """Map Paystack authorization codes to actual Paystack subscriptions."""
     try:
         response = await fetch_customer_subscriptions_by_code(customer_code)
     except PaystackError as exc:
-        logger.warning(
-            "customer=%s: unable to fetch Paystack subscriptions for correlation: %s",
-            customer_code,
-            exc,
-        )
+        logger.warning("customer=%s: unable to fetch subscriptions: %s", customer_code, exc)
         return {}
 
     result: dict[str, tuple[str | None, str | None]] = {}
     for subscription in response.get("data") or []:
         if not isinstance(subscription, dict):
             continue
-
         authorization = subscription.get("authorization") or {}
         if not isinstance(authorization, dict):
             continue
         auth_code = authorization.get("authorization_code")
         if not auth_code:
             continue
-
         plan_obj = subscription.get("plan") or {}
         if not isinstance(plan_obj, dict):
             plan_obj = {}
-
         plan_code = plan_obj.get("plan_code")
         if plan_code in plan_lookup:
             result[auth_code] = plan_lookup[plan_code]
-            continue
-
-        result[auth_code] = (
-            None,
-            _map_paystack_interval(plan_obj.get("interval")),
-        )
-
+        else:
+            result[auth_code] = (None, _map_paystack_interval(plan_obj.get("interval")))
     return result
 
 
@@ -195,62 +153,38 @@ def _classify_transaction(
     fallback_plan: str,
     fallback_interval: str | None,
 ) -> tuple[str, str | None, str]:
-    """Return (plan, interval, billing_type).
-
-    Billing type is determined by whether the transaction belongs to a
-    subscription, not by its payment channel or transaction status. In
-    particular, a recurring subscription may have a card or bank channel and
-    may have success/failed/abandoned/cancelled transaction statuses.
-    """
+    """Return (plan, interval, billing_type), never deriving billing type from channel."""
     metadata = _metadata(txn)
     metadata_plan = metadata.get("plan")
     metadata_interval = metadata.get("interval")
-
-    # First correlate the authorization with an actual Paystack subscription.
-    # This MUST happen before using incomplete metadata: older transactions
-    # can contain metadata.plan without metadata.interval, while their
-    # authorization still proves that they belong to a recurring subscription.
     authorization = txn.get("authorization") or {}
-    auth_code = (
-        authorization.get("authorization_code")
-        if isinstance(authorization, dict)
-        else None
-    )
+    auth_code = authorization.get("authorization_code") if isinstance(authorization, dict) else None
+
     if auth_code and auth_code in recurring_map:
         mapped_plan, mapped_interval = recurring_map[auth_code]
         return (
             str(metadata_plan or mapped_plan or fallback_plan),
-            metadata_interval
-            if metadata_interval in VALID_INTERVALS
-            else (mapped_interval or fallback_interval),
-            "onn",
+            metadata_interval if metadata_interval in VALID_INTERVALS else (mapped_interval or fallback_interval),
+            "recurring",
         )
 
-    # Complete EchoStream subscription metadata is also enough to classify
-    # the transaction, including failed/abandoned attempts made against a
-    # recurring plan that never produced an authorization code.
-    if metadata_plan and metadata_interval in VALID_INTERVALS:
-        return str(metadata_plan), metadata_interval, "recurring"
-
-    # Paystack may provide a plan object on some transaction responses.
     plan_obj = txn.get("plan") or {}
     if isinstance(plan_obj, dict) and plan_obj:
         plan_code = plan_obj.get("plan_code")
         if plan_code in plan_lookup:
             plan, interval = plan_lookup[plan_code]
-            return plan, interval, "recurring"
+            return str(metadata_plan or plan), metadata_interval if metadata_interval in VALID_INTERVALS else interval, "recurring"
         if plan_code:
-            return str(metadata_plan or fallback_plan), fallback_interval, "recurring"
+            return str(metadata_plan or fallback_plan), metadata_interval if metadata_interval in VALID_INTERVALS else fallback_interval, "recurring"
 
-    # A plan name by itself is not enough to call a transaction recurring.
-    # It can exist on legacy/one-time metadata without the interval or a
-    # matching Paystack subscription.
+    if metadata_plan and metadata_interval in VALID_INTERVALS:
+        return str(metadata_plan), metadata_interval, "recurring"
+
     return str(metadata_plan or fallback_plan), None, "one_time"
 
 
 def _transaction_user_id(txn: dict[str, Any]) -> int | None:
-    metadata = _metadata(txn)
-    value = metadata.get("user_id")
+    value = _metadata(txn).get("user_id")
     try:
         return int(value) if value is not None else None
     except (TypeError, ValueError):
@@ -258,33 +192,18 @@ def _transaction_user_id(txn: dict[str, Any]) -> int | None:
 
 
 def _transaction_method(txn: dict[str, Any]) -> str | None:
-    """Return the actual payment channel/method, separate from billing type."""
-    channel = str(txn.get("channel") or "").lower()
-    return channel
+    channel = str(txn.get("channel") or "").lower().strip()
+    return channel or None
 
 
-async def backfill_subscription(
-    db,
-    subscription: DBSubscription,
-    plan_lookup: dict[str, tuple[str, str]],
-    dry_run: bool,
-) -> tuple[int, int]:
+async def backfill_subscription(db, subscription: DBSubscription, plan_lookup: dict[str, tuple[str, str]], dry_run: bool) -> tuple[int, int]:
     if not subscription.paystack_customer_code:
         return 0, 0
-
     try:
         transactions = await _fetch_all_transactions(subscription.paystack_customer_code)
-        recurring_map = await _build_recurring_authorization_map(
-            subscription.paystack_customer_code,
-            plan_lookup,
-        )
+        recurring_map = await _build_recurring_authorization_map(subscription.paystack_customer_code, plan_lookup)
     except PaystackError as exc:
-        logger.warning(
-            "user_id=%s customer=%s: failed to fetch Paystack history (%s)",
-            subscription.user_id,
-            subscription.paystack_customer_code,
-            exc,
-        )
+        logger.warning("user_id=%s customer=%s: failed to fetch Paystack history: %s", subscription.user_id, subscription.paystack_customer_code, exc)
         return 0, 0
 
     local_interval = _subscription_interval(subscription)
@@ -294,74 +213,46 @@ async def backfill_subscription(
         reference = txn.get("reference")
         if not reference:
             continue
-
         txn_user_id = _transaction_user_id(txn)
         if txn_user_id is not None and txn_user_id != subscription.user_id:
-            logger.warning(
-                "customer=%s reference=%s: metadata user_id=%s does not match subscription user_id=%s; skipping",
-                subscription.paystack_customer_code,
-                reference,
-                txn_user_id,
-                subscription.user_id,
-            )
+            logger.warning("customer=%s reference=%s: metadata user_id=%s does not match subscription user_id=%s; skipping", subscription.paystack_customer_code, reference, txn_user_id, subscription.user_id)
             continue
 
-        
-        plan, interval, billing_type = _classify_transaction(
-            txn,
-            recurring_map,
-            plan_lookup,
-            fallback_plan=subscription.plan,
-            fallback_interval=local_interval,
-        )
-
+        plan, interval, billing_type = _classify_transaction(txn, recurring_map, plan_lookup, subscription.plan, local_interval)
         status = str(txn.get("status") or "unknown").lower()
         created_at = _parse_paystack_datetime(txn.get("created_at"))
         paid_at = _parse_paystack_datetime(txn.get("paid_at"))
         channel = str(txn.get("channel") or "").lower() or None
         method = _transaction_method(txn)
-        billing_type = "reoccuring" if method in ("card", "direct_debit") else "one_time" 
 
         if dry_run:
-            logger.info(
-                "[dry-run] user_id=%s reference=%s status=%s plan=%s interval=%s billing_type=%s channel=%s method=%s amount=%s created_at=%s paid_at=%s",
-                subscription.user_id,
-                reference,
-                status,
-                plan,
-                interval,
-                billing_type,
-                channel,
-                method,
-                txn.get("amount"),
-                created_at,
-                paid_at,
-            )
+            logger.info("[dry-run] user_id=%s reference=%s status=%s plan=%s interval=%s billing_type=%s channel=%s method=%s", subscription.user_id, reference, status, plan, interval, billing_type, channel, method)
             written += 1
             continue
 
-        values = dict(
-            user_id=subscription.user_id,
-            subscription_id=subscription.id,
-            reference=reference,
-            plan=plan,
-            interval=interval,
-            amount=txn.get("amount"),
-            currency=(txn.get("currency") or "NGN").upper(),
-            status=status,
-            channel=channel,
-            method=method,
-            payment_method=method,
-            billing_type=billing_type,
-            event="backfill",
-            paid_at=paid_at,
-            created_at=created_at or _utcnow(),
-        )
-
+        values = {
+            "user_id": subscription.user_id,
+            "subscription_id": subscription.id,
+            "reference": reference,
+            "plan": plan,
+            "interval": interval,
+            "amount": txn.get("amount"),
+            "currency": (txn.get("currency") or "NGN").upper(),
+            "status": status,
+            "channel": channel,
+            "method": method,
+            "payment_method": method,
+            "billing_type": billing_type,
+            "event": "backfill",
+            "paid_at": paid_at,
+            "created_at": created_at or _utcnow(),
+        }
         stmt = insert(DBPaymentHistory).values(**values)
         stmt = stmt.on_conflict_do_update(
             index_elements=[DBPaymentHistory.reference],
             set_={
+                "user_id": stmt.excluded.user_id,
+                "subscription_id": stmt.excluded.subscription_id,
                 "status": stmt.excluded.status,
                 "plan": stmt.excluded.plan,
                 "interval": stmt.excluded.interval,
@@ -371,12 +262,10 @@ async def backfill_subscription(
                 "method": stmt.excluded.method,
                 "payment_method": stmt.excluded.payment_method,
                 "billing_type": stmt.excluded.billing_type,
+                "event": stmt.excluded.event,
                 "paid_at": stmt.excluded.paid_at,
             },
-            where=(
-                (DBPaymentHistory.billing_type == "one_time")
-                & (stmt.excluded.billing_type == "recurring")
-            ),
+            where=(DBPaymentHistory.billing_type != stmt.excluded.billing_type) | DBPaymentHistory.billing_type.is_(None),
         )
         result = await db.execute(stmt)
         if result.rowcount:
@@ -384,69 +273,38 @@ async def backfill_subscription(
 
     if not dry_run:
         await db.commit()
-
     return len(transactions), written
 
 
 async def run(dry_run: bool = False, user_id: int | None = None) -> None:
     plan_lookup = _build_plan_code_lookup()
-
     async with AsyncSessionLocal() as db:
-        query = select(DBSubscription).where(
-            DBSubscription.paystack_customer_code.is_not(None)
-        )
+        query = select(DBSubscription).where(DBSubscription.paystack_customer_code.is_not(None))
         if user_id is not None:
             query = query.where(DBSubscription.user_id == user_id)
         subscriptions = (await db.execute(query)).scalars().all()
 
     logger.info("Found %d subscription(s) with a Paystack customer code", len(subscriptions))
-
     total_seen = 0
     total_written = 0
-
     for subscription in subscriptions:
         async with AsyncSessionLocal() as db:
             current = await db.get(DBSubscription, subscription.id)
             if current is None:
                 continue
-            seen, written = await backfill_subscription(
-                db,
-                current,
-                plan_lookup,
-                dry_run,
-            )
-
+            seen, written = await backfill_subscription(db, current, plan_lookup, dry_run)
         total_seen += seen
         total_written += written
-        logger.info(
-            "user_id=%s: %d transaction(s) seen, %d row(s) written/corrected",
-            subscription.user_id,
-            seen,
-            written,
-        )
+        logger.info("user_id=%s: %d transaction(s) seen, %d row(s) written/corrected", subscription.user_id, seen, written)
         await asyncio.sleep(REQUEST_DELAY_SECONDS)
 
-    logger.info(
-        "Backfill complete: %d transaction(s) seen, %d row(s) written/corrected%s",
-        total_seen,
-        total_written,
-        " (dry run, nothing written)" if dry_run else "",
-    )
+    logger.info("Backfill complete: %d transaction(s) seen, %d row(s) written/corrected%s", total_seen, total_written, " (dry run, nothing written)" if dry_run else "")
 
 
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument(
-        "--dry-run",
-        action="store_true",
-        help="Fetch and log what would be written without changing the database.",
-    )
-    parser.add_argument(
-        "--user-id",
-        type=int,
-        default=None,
-        help="Only backfill this user's subscription.",
-    )
+    parser.add_argument("--dry-run", action="store_true")
+    parser.add_argument("--user-id", type=int, default=None)
     args = parser.parse_args()
     asyncio.run(run(dry_run=args.dry_run, user_id=args.user_id))
 
