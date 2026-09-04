@@ -134,7 +134,7 @@ async def record_payment_history(
     except (TypeError, ValueError):
         amount_int = None
 
-    stmt = insert(DBPaymentHistory).values(
+    insert_stmt = insert(DBPaymentHistory).values(
         user_id=user_id,
         subscription_id=subscription_id,
         reference=reference,
@@ -148,7 +148,19 @@ async def record_payment_history(
         event=event,
         paid_at=paid_at,
         created_at=now_utc(),
-    ).on_conflict_do_nothing(index_elements=[DBPaymentHistory.reference])
+    )
+    # A row for this reference may already exist from an earlier, less
+    # certain write (e.g. verify_payment ran before Paystack's own
+    # subscription record was queryable). If a later write establishes that
+    # the payment is actually recurring, let it correct the row instead of
+    # being silently dropped - but never downgrade a confirmed "recurring"
+    # back to "one_time".
+    stmt = insert_stmt.on_conflict_do_update(
+        index_elements=[DBPaymentHistory.reference],
+        set_={"payment_method": insert_stmt.excluded.payment_method},
+        where=(DBPaymentHistory.payment_method == "one_time")
+        & (insert_stmt.excluded.payment_method == "recurring"),
+    )
     await db.execute(stmt)
 
 
@@ -533,13 +545,42 @@ async def verify_payment(
     authorization = data.get("authorization") or {}
     customer = data.get("customer") or {}
     authorization_code = authorization.get("authorization_code")
-    subscription_code = data.get("subscription_code")
-    recurring = bool(authorization_code and subscription_code)
-    if channel in {"bank", "bank_transfer"} and not subscription_code:
-        recurring = False
+    reusable = bool(authorization.get("reusable"))
+    customer_code = customer.get("customer_code")
+    purpose = metadata.get("purpose", "new_subscription")
+
+    # NOTE: Paystack's /transaction/verify response never includes a
+    # subscription_code field - Paystack creates the subscription behind the
+    # scenes and only reports it via the separate `subscription.create`
+    # webhook (or by listing the customer's subscriptions). Reading
+    # data.get("subscription_code") here would always be None, which used to
+    # make every card payment look like a one-time payment. Instead, decide
+    # "recurring" from the actual signal we do have (a reusable card
+    # authorization on a plan-based checkout), then best-effort resolve the
+    # real subscription_code so period dates are accurate immediately - if
+    # that lookup misses due to a race with Paystack's own processing, the
+    # incoming subscription.create webhook fills it in afterwards.
+    intended_recurring = purpose == "new_subscription" and channel not in {"bank", "bank_transfer"}
+    recurring = bool(authorization_code) and reusable and intended_recurring
+
+    subscription_code = None
+    if recurring and customer_code:
+        try:
+            target_plan_code = get_plan_code(payment_plan, payment_interval)
+            subs_result = await fetch_customer_subscriptions_by_code(customer_code)
+            for sub in subs_result.get("data") or []:
+                plan_obj = sub.get("plan") or {}
+                if (
+                    plan_obj.get("plan_code") == target_plan_code
+                    and sub.get("status") in {"active", "non-renewing"}
+                ):
+                    subscription_code = sub.get("subscription_code")
+                    break
+        except PaystackError:
+            subscription_code = None
 
     paid_at = parse_paystack_datetime(data.get("paid_at")) or now_utc()
-    if recurring:
+    if recurring and subscription_code:
         try:
             subscription_result = await fetch_subscription(subscription_code)
             subscription_data = subscription_result.get("data") or {}
@@ -555,13 +596,18 @@ async def verify_payment(
     if not period_end:
         period_end = add_billing_period(period_start, payment_interval)
 
-    purpose = metadata.get("purpose", "new_subscription")
     subscription.plan = payment_plan
     subscription.status = "active"
     subscription.reference = reference
-    subscription.authorization_code = authorization_code if recurring else None
-    subscription.paystack_customer_code = customer.get("customer_code")
-    subscription.paystack_subscription_code = subscription_code if recurring else None
+    # Keep the authorization code whenever Paystack gave us one - it's useful
+    # even for a payment we're not (yet) treating as recurring, and never
+    # having to write over it with None avoids clobbering a value the
+    # subscription.create webhook may have already set.
+    if authorization_code:
+        subscription.authorization_code = authorization_code
+    subscription.paystack_customer_code = customer_code
+    if subscription_code:
+        subscription.paystack_subscription_code = subscription_code
     subscription.current_period_start = period_start
     subscription.current_period_end = period_end
     subscription.cancel_at_period_end = not recurring

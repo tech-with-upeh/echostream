@@ -34,7 +34,7 @@ app.add_middleware(
     allow_origins=[
         "http://localhost:3000",
         "http://127.0.0.1:3000",
-        "https://0a47-102-90-103-164.ngrok-free.app"
+        "http://172.20.10.6:3000"
         # your production frontend URL goes here
     ],
     allow_credentials=True,
