@@ -71,7 +71,7 @@ async def paystack_request(
 async def initialize_transaction(
     *,
     email: str,
-    plan_code: str,
+    plan_code: str | None = None,
     reference: str,
     callback_url: str,
     metadata: dict[str, Any],
@@ -82,11 +82,12 @@ async def initialize_transaction(
         raise ValueError("Provide either amount_naira or amount_kobo, not both")
     payload: dict[str, Any] = {
         "email": email,
-        "plan": plan_code,
         "reference": reference,
         "callback_url": callback_url,
         "metadata": json.dumps(metadata),
     }
+    if plan_code:
+        payload["plan"] = plan_code
     if amount_kobo is not None:
         payload["amount"] = int(amount_kobo)
     elif amount_naira is not None:
