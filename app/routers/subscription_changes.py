@@ -1,5 +1,6 @@
 import json
 from datetime import datetime, timezone
+from decimal import Decimal, ROUND_HALF_UP
 
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy import select
@@ -12,6 +13,7 @@ from app.paystack_service import (
     PaystackError,
     create_subscription,
     disable_subscription,
+    fetch_plan,
     fetch_subscription,
     get_plan_code,
     initialize_transaction,
@@ -65,6 +67,208 @@ def add_billing_period(start: datetime, interval: str) -> datetime:
         year += 1
     days = [31, 29 if year % 4 == 0 else 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31]
     return start.replace(year=year, month=month, day=min(start.day, days[month - 1]))
+
+
+async def get_user_subscription(db: AsyncSession, user_id: int) -> DBSubscription | None:
+    result = await db.execute(select(DBSubscription).where(DBSubscription.user_id == user_id))
+    return result.scalar_one_or_none()
+
+
+async def get_upgrade_context(db: AsyncSession, current_user: DBUser, plan: str, interval: str):
+    plan = plan.strip().lower()
+    interval = interval.strip().lower()
+    if plan not in PAID_PLANS:
+        raise HTTPException(status_code=400, detail="Invalid paid subscription plan")
+    if interval not in VALID_INTERVALS:
+        raise HTTPException(status_code=400, detail="Invalid billing interval. Use month or year.")
+
+    subscription = await get_user_subscription(db, current_user.id)
+    if not subscription:
+        raise HTTPException(status_code=400, detail="No subscription record found")
+
+    metadata = get_metadata(subscription)
+    current_plan = str(current_user.plan or subscription.plan or "").strip().lower()
+    current_interval = str(metadata.get("interval") or "").strip().lower()
+    recurring = bool(metadata.get("recurring", bool(subscription.authorization_code)))
+
+    if current_plan not in PAID_PLANS:
+        raise HTTPException(status_code=400, detail="Only paid subscriptions can be upgraded")
+    if current_interval not in VALID_INTERVALS:
+        raise HTTPException(status_code=400, detail="Current subscription billing interval is unavailable")
+    if not recurring or not subscription.authorization_code or not subscription.paystack_subscription_code:
+        raise HTTPException(status_code=400, detail="An active recurring subscription is required for an upgrade")
+    if current_plan == plan and current_interval == interval:
+        raise HTTPException(status_code=400, detail="You are already on this plan and billing interval")
+
+    try:
+        current_plan_data = await fetch_plan(get_plan_code(current_plan, current_interval))
+        target_plan_data = await fetch_plan(get_plan_code(plan, interval))
+    except PaystackError as exc:
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
+
+    current_price_kobo = int((current_plan_data.get("data") or {}).get("amount") or 0)
+    target_price_kobo = int((target_plan_data.get("data") or {}).get("amount") or 0)
+    if current_price_kobo <= 0 or target_price_kobo <= 0:
+        raise HTTPException(status_code=502, detail="Could not determine subscription prices from Paystack")
+    if target_price_kobo <= current_price_kobo:
+        raise HTTPException(status_code=400, detail="The selected subscription is not an upgrade")
+
+    try:
+        current_remote = await fetch_subscription(subscription.paystack_subscription_code)
+    except PaystackError as exc:
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
+
+    remote_data = current_remote.get("data") or {}
+    period_start = parse_datetime(remote_data.get("start")) or subscription.current_period_start
+    period_end = parse_datetime(remote_data.get("next_payment_date")) or subscription.current_period_end
+    if not period_start or not period_end:
+        raise HTTPException(status_code=400, detail="Could not determine the current billing period")
+
+    period_start = period_start.astimezone(timezone.utc)
+    period_end = period_end.astimezone(timezone.utc)
+    now = now_utc()
+    if period_end <= now:
+        raise HTTPException(status_code=400, detail="The current subscription period has ended")
+
+    total_days = Decimal(str((period_end - period_start).total_seconds())) / Decimal("86400")
+    remaining_days = Decimal(str((period_end - now).total_seconds())) / Decimal("86400")
+    if total_days <= 0:
+        raise HTTPException(status_code=400, detail="Invalid current billing period")
+    if remaining_days < 0:
+        remaining_days = Decimal("0")
+
+    current_price_naira = Decimal(current_price_kobo) / Decimal("100")
+    target_price_naira = Decimal(target_price_kobo) / Decimal("100")
+
+    # Unused value = current plan price × remaining days / total days.
+    unused_value = current_price_naira * remaining_days / total_days
+    upgrade_amount = target_price_naira - unused_value
+    if upgrade_amount < 0:
+        upgrade_amount = Decimal("0")
+
+    upgrade_amount_kobo = int((upgrade_amount * Decimal("100")).quantize(Decimal("1"), rounding=ROUND_HALF_UP))
+    unused_value_kobo = int((unused_value * Decimal("100")).quantize(Decimal("1"), rounding=ROUND_HALF_UP))
+
+    return {
+        "subscription": subscription,
+        "metadata": metadata,
+        "current_plan": current_plan,
+        "current_interval": current_interval,
+        "new_plan": plan,
+        "new_interval": interval,
+        "period_start": period_start,
+        "period_end": period_end,
+        "total_days": float(total_days),
+        "remaining_days": float(remaining_days),
+        "current_plan_price": float(current_price_naira),
+        "new_plan_price": float(target_price_naira),
+        "unused_value": float(unused_value.quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)),
+        "unused_value_kobo": unused_value_kobo,
+        "upgrade_amount": float(Decimal(upgrade_amount_kobo) / Decimal("100")),
+        "upgrade_amount_kobo": upgrade_amount_kobo,
+    }
+
+
+@router.post("/upgrade/quote")
+async def upgrade_quote(
+    plan: str,
+    interval: str,
+    current_user: DBUser = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    context = await get_upgrade_context(db, current_user, plan, interval)
+    return {
+        "current_plan": context["current_plan"],
+        "current_interval": context["current_interval"],
+        "new_plan": context["new_plan"],
+        "new_interval": context["new_interval"],
+        "currency": "NGN",
+        "current_plan_price": context["current_plan_price"],
+        "new_plan_price": context["new_plan_price"],
+        "billing_interval": context["new_interval"],
+        "current_period_start": context["period_start"],
+        "current_period_ends_at": context["period_end"],
+        "total_days": context["total_days"],
+        "remaining_days": context["remaining_days"],
+        "unused_value": context["unused_value"],
+        "upgrade_amount": context["upgrade_amount"],
+    }
+
+
+@router.post("/upgrade")
+async def upgrade_subscription(
+    plan: str,
+    interval: str,
+    current_user: DBUser = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    context = await get_upgrade_context(db, current_user, plan, interval)
+    subscription = context["subscription"]
+    metadata = context["metadata"]
+
+    pending_reference = metadata.get("pending_upgrade_reference")
+    if pending_reference:
+        return {
+            "status": "already_pending",
+            "current_plan": context["current_plan"],
+            "current_interval": context["current_interval"],
+            "new_plan": context["new_plan"],
+            "new_interval": context["new_interval"],
+            "reference": pending_reference,
+        }
+
+    reference = f"echostream_upgrade_{current_user.id}_{now_utc().strftime('%Y%m%d%H%M%S%f')}"
+    try:
+        result = await initialize_transaction(
+            email=current_user.email,
+            plan_code=get_plan_code(context["new_plan"], context["new_interval"]),
+            reference=reference,
+            callback_url=settings.PAYSTACK_CALLBACK_URL,
+            metadata={
+                "user_id": current_user.id,
+                "plan": context["new_plan"],
+                "interval": context["new_interval"],
+                "purpose": "new_subscription",
+                "upgrade": True,
+                "previous_plan": context["current_plan"],
+                "previous_interval": context["current_interval"],
+                "unused_value": context["unused_value"],
+                "upgrade_amount": context["upgrade_amount"],
+            },
+            amount_naira=context["upgrade_amount_kobo"] // 100,
+        )
+    except PaystackError as exc:
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
+
+    data = result.get("data") or {}
+    reference = data.get("reference") or reference
+    metadata.update({
+        "pending_plan": context["new_plan"],
+        "pending_interval": context["new_interval"],
+        "pending_upgrade_reference": reference,
+        "upgrade": True,
+        "upgrade_amount": context["upgrade_amount"],
+        "upgrade_amount_kobo": context["upgrade_amount_kobo"],
+        "previous_plan": context["current_plan"],
+        "previous_interval": context["current_interval"],
+    })
+    set_metadata(subscription, metadata)
+    subscription.last_event = "subscription.upgrade.payment_pending"
+    subscription.updated_at = now_utc()
+    await db.commit()
+
+    return {
+        "status": "payment_required",
+        "current_plan": context["current_plan"],
+        "current_interval": context["current_interval"],
+        "new_plan": context["new_plan"],
+        "new_interval": context["new_interval"],
+        "upgrade_amount": context["upgrade_amount"],
+        "currency": "NGN",
+        "reference": reference,
+        "authorization_url": data.get("authorization_url"),
+        "access_code": data.get("access_code"),
+    }
 
 
 @router.post("/change-plan")
@@ -209,7 +413,6 @@ async def verify_payment(
     current_user: DBUser = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ):
-    """Verify any EchoStream Paystack payment in one endpoint."""
     result = await db.execute(
         select(DBSubscription).where(
             DBSubscription.user_id == current_user.id,
@@ -222,7 +425,7 @@ async def verify_payment(
         result = await db.execute(
             select(DBSubscription).where(
                 DBSubscription.user_id == current_user.id,
-                DBSubscription.metadata_json.like(f'%"pending_change_reference": "{reference}"%'),
+                DBSubscription.metadata_json.like(f'%\"pending_change_reference\": \"{reference}\"%'),
             )
         )
         subscription = result.scalar_one_or_none()
@@ -290,6 +493,11 @@ async def verify_payment(
     metadata.pop("pending_interval", None)
     metadata.pop("pending_change_reference", None)
     metadata.pop("pending_change_recurring", None)
+    metadata.pop("pending_upgrade_reference", None)
+    metadata.pop("upgrade_amount", None)
+    metadata.pop("upgrade_amount_kobo", None)
+    metadata.pop("previous_plan", None)
+    metadata.pop("previous_interval", None)
     set_metadata(subscription, metadata)
 
     current_user.plan = payment_plan
