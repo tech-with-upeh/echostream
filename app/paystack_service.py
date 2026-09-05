@@ -28,7 +28,9 @@ async def paystack_request(method: str, path: str, *, payload: Optional[dict[str
         raise PaystackError(data.get("message") or "Paystack request was unsuccessful")
     return data
 
-async def initialize_transaction(*, email: str, plan_code: str, reference: str, callback_url: str, metadata: dict[str, Any], amount_naira: int | None = None) -> dict[str, Any]:
+async def initialize_transaction(*, email: str, plan_code: str, reference: str, callback_url: str, metadata: dict[str, Any], amount_naira: int | None = None, amount_kobo: int | None = None) -> dict[str, Any]:
+    if amount_naira is not None and amount_kobo is not None:
+        raise ValueError("Provide either amount_naira or amount_kobo, not both")
     payload: dict[str, Any] = {
         "email": email,
         "plan": plan_code,
@@ -36,7 +38,9 @@ async def initialize_transaction(*, email: str, plan_code: str, reference: str, 
         "callback_url": callback_url,
         "metadata": json.dumps(metadata),
     }
-    if amount_naira is not None:
+    if amount_kobo is not None:
+        payload["amount"] = int(amount_kobo)
+    elif amount_naira is not None:
         payload["amount"] = int(amount_naira) * 100
     return await paystack_request("POST", "/transaction/initialize", payload=payload)
 
@@ -88,7 +92,7 @@ async def list_subscr(*, page: int = 1, per_page: int = 100) -> dict[str, Any]:
     """List Paystack subscriptions for reconciliation/backfill."""
     return await paystack_request("GET", "/subscription", params={"page": page, "perPage": per_page})
 
-async def fetch_customer_subscriptions(customer_id: int) -> dict[str, Any]:
+async def fetch_customer_subscriptions(*, customer_id: int) -> dict[str, Any]:
     return await paystack_request("GET", "/subscription", params={"customer": customer_id, "perPage": 100, "page": 1})
 
 async def fetch_customer_subscriptions_by_code(customer_code: str) -> dict[str, Any]:
@@ -97,7 +101,7 @@ async def fetch_customer_subscriptions_by_code(customer_code: str) -> dict[str, 
     customer_id = customer.get("id")
     if not customer_id:
         raise PaystackError("Paystack customer response did not contain a customer ID")
-    return await fetch_customer_subscriptions(int(customer_id))
+    return await fetch_customer_subscriptions(customer_id=int(customer_id))
 
 async def get_subscription_manage_link(subscription_code: str) -> dict[str, Any]:
     return await paystack_request("GET", f"/subscription/{subscription_code}/manage/link")
