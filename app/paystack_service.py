@@ -92,7 +92,7 @@ async def list_subscr(*, page: int = 1, per_page: int = 100) -> dict[str, Any]:
     """List Paystack subscriptions for reconciliation/backfill."""
     return await paystack_request("GET", "/subscription", params={"page": page, "perPage": per_page})
 
-async def fetch_customer_subscriptions(*, customer_id: int) -> dict[str, Any]:
+async def fetch_customer_subscriptions(customer_id: int) -> dict[str, Any]:
     return await paystack_request("GET", "/subscription", params={"customer": customer_id, "perPage": 100, "page": 1})
 
 async def fetch_customer_subscriptions_by_code(customer_code: str) -> dict[str, Any]:
@@ -101,7 +101,7 @@ async def fetch_customer_subscriptions_by_code(customer_code: str) -> dict[str, 
     customer_id = customer.get("id")
     if not customer_id:
         raise PaystackError("Paystack customer response did not contain a customer ID")
-    return await fetch_customer_subscriptions(customer_id=int(customer_id))
+    return await fetch_customer_subscriptions(int(customer_id))
 
 async def get_subscription_manage_link(subscription_code: str) -> dict[str, Any]:
     return await paystack_request("GET", f"/subscription/{subscription_code}/manage/link")
