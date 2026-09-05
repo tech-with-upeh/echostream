@@ -7,6 +7,7 @@ from app.gift_catalog import gift_catalog_scheduler
 from app.live_runtime import command_listener, owner_heartbeat
 from app.rate_limit import RedisRateLimitMiddleware
 from app.redis_store import close_redis, ping_redis
+from app.paystack_service import close_paystack_client
 from app.routers import auth, gifts, live, payments, payment_receipts, payment_reconciliation, prefrences, subscription_changes, voice, wstts, sounds
 from app.routers import paystack_webhook
 import app.models
@@ -27,6 +28,7 @@ async def lifespan(app: FastAPI):
             task.cancel()
         await asyncio.gather(command_task, heartbeat_task, gift_sync_task, return_exceptions=True)
         await close_redis()
+        await close_paystack_client()
 
 
 app = FastAPI(title="EchoStream Backend API", lifespan=lifespan)
