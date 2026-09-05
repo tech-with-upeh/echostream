@@ -253,6 +253,7 @@ async def upgrade_subscription(
         "previous_interval": context["current_interval"],
     })
     set_metadata(subscription, metadata)
+    subscription.reference = reference
     subscription.last_event = "subscription.upgrade.payment_pending"
     subscription.updated_at = now_utc()
     await db.commit()
@@ -492,7 +493,6 @@ async def verify_payment(
     metadata.pop("pending_plan", None)
     metadata.pop("pending_interval", None)
     metadata.pop("pending_change_reference", None)
-    metadata.pop("pending_change_recurring", None)
     metadata.pop("pending_upgrade_reference", None)
     metadata.pop("upgrade_amount", None)
     metadata.pop("upgrade_amount_kobo", None)
