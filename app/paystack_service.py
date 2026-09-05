@@ -1,6 +1,7 @@
 import hashlib
 import hmac
 import json
+from decimal import Decimal
 from typing import Any, Optional
 
 import httpx
@@ -28,7 +29,7 @@ async def paystack_request(method: str, path: str, *, payload: Optional[dict[str
         raise PaystackError(data.get("message") or "Paystack request was unsuccessful")
     return data
 
-async def initialize_transaction(*, email: str, plan_code: str, reference: str, callback_url: str, metadata: dict[str, Any], amount_naira: int | None = None, amount_kobo: int | None = None) -> dict[str, Any]:
+async def initialize_transaction(*, email: str, plan_code: str, reference: str, callback_url: str, metadata: dict[str, Any], amount_naira: int | Decimal | None = None, amount_kobo: int | None = None) -> dict[str, Any]:
     if amount_naira is not None and amount_kobo is not None:
         raise ValueError("Provide either amount_naira or amount_kobo, not both")
     payload: dict[str, Any] = {
@@ -41,7 +42,7 @@ async def initialize_transaction(*, email: str, plan_code: str, reference: str, 
     if amount_kobo is not None:
         payload["amount"] = int(amount_kobo)
     elif amount_naira is not None:
-        payload["amount"] = int(amount_naira) * 100
+        payload["amount"] = int(Decimal(str(amount_naira)) * Decimal("100"))
     return await paystack_request("POST", "/transaction/initialize", payload=payload)
 
 async def verify_transaction(reference: str) -> dict[str, Any]:
