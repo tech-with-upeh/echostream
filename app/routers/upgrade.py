@@ -314,7 +314,6 @@ async def upgrade_subscription(plan: str, interval: str, current_user: DBUser = 
         result = await initialize_transaction(email=current_user.email, reference=reference, callback_url=settings.PAYSTACK_CALLBACK_URL, metadata={"user_id": current_user.id, "plan": context["new_plan"], "interval": context["new_interval"], "purpose": "upgrade", "upgrade": True, "previous_plan": context["current_plan"], "previous_interval": context["current_interval"], "previous_subscription_code": subscription.paystack_subscription_code, "unused_value_kobo": context["unused_value_kobo"], "upgrade_amount_kobo": context["upgrade_amount_kobo"], "credit_remaining_kobo": 0, "first_debit": context["first_debit"].isoformat()}, amount_kobo=context["upgrade_amount_kobo"])
     except PaystackError as exc:
         raise HTTPException(status_code=502, detail=str(exc)) from exc
-
     data = result.get("data") or {}
     reference = data.get("reference") or reference
     metadata.update({"pending_plan": context["new_plan"], "pending_interval": context["new_interval"], "pending_upgrade_reference": reference, "upgrade": True, "upgrade_amount": context["upgrade_amount"], "upgrade_amount_kobo": context["upgrade_amount_kobo"], "upgrade_credit_kobo": 0, "previous_plan": context["current_plan"], "previous_interval": context["current_interval"], "previous_subscription_code": subscription.paystack_subscription_code, "previous_authorization_code": subscription.authorization_code, "upgrade_first_debit": context["first_debit"].isoformat()})
@@ -323,7 +322,6 @@ async def upgrade_subscription(plan: str, interval: str, current_user: DBUser = 
     subscription.last_event = "subscription.upgrade.payment_pending"
     subscription.updated_at = now_utc()
     await db.commit()
-
     return {"status": "payment_required", "current_plan": context["current_plan"], "current_interval": context["current_interval"], "new_plan": context["new_plan"], "new_interval": context["new_interval"], "upgrade_amount": context["upgrade_amount"], "currency": "NGN", "reference": reference, "authorization_url": data.get("authorization_url"), "access_code": data.get("access_code"), "first_debit": context["first_debit"], "credit_remaining": 0}
 
 
@@ -333,7 +331,7 @@ async def finalize_upgrade_reference(db: AsyncSession, reference: str, user: DBU
     if not subscription:
         raise HTTPException(status_code=404, detail="Payment reference not found")
     metadata = get_metadata(subscription)
-    if not metadata.get("upgrade") and metadata.get("pending_upgrade_reference") != reference:
+    if not (metadata.get("upgrade") or metadata.get("upgrade_completed") or metadata.get("pending_upgrade_reference") == reference):
         raise HTTPException(status_code=404, detail="Payment reference is not an upgrade")
     if metadata.get("upgrade_completed") and subscription.paystack_subscription_code:
         return {"status": "success", "plan": subscription.plan, "interval": metadata.get("interval"), "subscription_code": subscription.paystack_subscription_code, "reference": reference}
@@ -345,7 +343,6 @@ async def finalize_upgrade_reference(db: AsyncSession, reference: str, user: DBU
     data = payment.get("data") or {}
     if str(data.get("status") or "").lower() != "success":
         return {"status": str(data.get("status") or "failed").lower(), "reference": reference}
-
     authorization = data.get("authorization") or {}
     authorization_code = authorization.get("authorization_code") or subscription.authorization_code
     if not authorization_code:
@@ -355,17 +352,14 @@ async def finalize_upgrade_reference(db: AsyncSession, reference: str, user: DBU
         subscription.paystack_customer_code = customer["customer_code"]
     if not subscription.paystack_customer_code:
         raise HTTPException(status_code=400, detail="Paystack customer information is missing")
-
     plan = metadata.get("pending_plan") or metadata.get("plan")
     interval = metadata.get("pending_interval") or metadata.get("interval")
     if plan not in PAID_PLANS or interval not in VALID_INTERVALS:
         raise HTTPException(status_code=400, detail="Upgrade metadata is invalid")
-
     context = await get_upgrade_context(db, user, plan, interval)
     first_debit = parse_datetime(metadata.get("upgrade_first_debit"))
     if first_debit:
         context["first_debit"] = first_debit
-
     return await complete_upgrade(db, user, subscription, context, payment_reference=reference, authorization_code=authorization_code, payment_channel=str(data.get("channel") or "unknown").lower(), paid_at=parse_datetime(data.get("paid_at")) or now_utc(), payment_amount_kobo=int(data.get("amount") or 0))
 
 
@@ -373,7 +367,7 @@ async def finalize_upgrade_reference(db: AsyncSession, reference: str, user: DBU
 async def verify_upgrade_or_delegate(reference: str, current_user: DBUser = Depends(get_current_user), db: AsyncSession = Depends(get_db)):
     result = await db.execute(select(DBSubscription).where(DBSubscription.user_id == current_user.id, DBSubscription.reference == reference))
     subscription = result.scalar_one_or_none()
-    if subscription and get_metadata(subscription).get("upgrade"):
+    if subscription and (get_metadata(subscription).get("upgrade") or get_metadata(subscription).get("upgrade_completed")):
         return await finalize_upgrade_reference(db, reference, current_user)
     from app.routers.payment_reconciliation import verify_payment as reconciliation_verify_payment
     return await reconciliation_verify_payment(reference, current_user, db)
@@ -386,7 +380,7 @@ async def upgrade_callback(reference: str | None = None, trxref: str | None = No
         return RedirectResponse(url=f"{settings.FRONTEND_URL}/payment/failed")
     result = await db.execute(select(DBSubscription).where(DBSubscription.reference == payment_reference))
     subscription = result.scalar_one_or_none()
-    if not subscription or not get_metadata(subscription).get("upgrade"):
+    if not subscription or not (get_metadata(subscription).get("upgrade") or get_metadata(subscription).get("upgrade_completed")):
         from app.routers.payment_reconciliation import payment_callback as reconciliation_payment_callback
         return await reconciliation_payment_callback(payment_reference, trxref, db)
     try:
@@ -411,14 +405,13 @@ async def upgrade_webhook(request: Request, db: AsyncSession = Depends(get_db)):
         payload = json.loads(raw_body.decode("utf-8"))
     except (UnicodeDecodeError, json.JSONDecodeError) as exc:
         raise HTTPException(status_code=400, detail="Invalid webhook payload") from exc
-
     event = str(payload.get("event") or "")
     data = payload.get("data") or {}
     reference = data.get("reference")
     if event in {"charge.success", "charge.failed"} and reference:
         result = await db.execute(select(DBSubscription).where(DBSubscription.reference == reference))
         subscription = result.scalar_one_or_none()
-        if subscription and get_metadata(subscription).get("upgrade"):
+        if subscription and (get_metadata(subscription).get("upgrade") or get_metadata(subscription).get("upgrade_completed")):
             if event == "charge.failed":
                 return {"received": True}
             user_result = await db.execute(select(DBUser).where(DBUser.id == subscription.user_id))
