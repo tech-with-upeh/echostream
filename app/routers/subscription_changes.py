@@ -235,7 +235,7 @@ async def upgrade_subscription(
                 "unused_value": context["unused_value"],
                 "upgrade_amount": context["upgrade_amount"],
             },
-            amount_naira=context["upgrade_amount_kobo"] // 100,
+            amount_naira=Decimal(context["upgrade_amount_kobo"]) / Decimal("100"),
         )
     except PaystackError as exc:
         raise HTTPException(status_code=502, detail=str(exc)) from exc
