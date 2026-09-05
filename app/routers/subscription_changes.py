@@ -139,8 +139,6 @@ async def get_upgrade_context(db: AsyncSession, current_user: DBUser, plan: str,
 
     current_price_naira = Decimal(current_price_kobo) / Decimal("100")
     target_price_naira = Decimal(target_price_kobo) / Decimal("100")
-
-    # Unused value = current plan price × remaining days / total days.
     unused_value = current_price_naira * remaining_days / total_days
     upgrade_amount = target_price_naira - unused_value
     if upgrade_amount < 0:
@@ -219,9 +217,12 @@ async def upgrade_subscription(
 
     reference = f"echostream_upgrade_{current_user.id}_{now_utc().strftime('%Y%m%d%H%M%S%f')}"
     try:
+        # Upgrade payment is intentionally a one-time charge. Passing a Paystack
+        # plan here would make Paystack use the plan amount instead of our
+        # server-calculated prorated amount. The recurring target subscription
+        # is created only after this payment succeeds.
         result = await initialize_transaction(
             email=current_user.email,
-            plan_code=get_plan_code(context["new_plan"], context["new_interval"]),
             reference=reference,
             callback_url=settings.PAYSTACK_CALLBACK_URL,
             metadata={
@@ -232,10 +233,11 @@ async def upgrade_subscription(
                 "upgrade": True,
                 "previous_plan": context["current_plan"],
                 "previous_interval": context["current_interval"],
+                "previous_subscription_code": subscription.paystack_subscription_code,
                 "unused_value": context["unused_value"],
                 "upgrade_amount": context["upgrade_amount"],
             },
-            amount_naira=Decimal(context["upgrade_amount_kobo"]) / Decimal("100"),
+            amount_kobo=context["upgrade_amount_kobo"],
         )
     except PaystackError as exc:
         raise HTTPException(status_code=502, detail=str(exc)) from exc
@@ -251,6 +253,8 @@ async def upgrade_subscription(
         "upgrade_amount_kobo": context["upgrade_amount_kobo"],
         "previous_plan": context["current_plan"],
         "previous_interval": context["current_interval"],
+        "previous_subscription_code": subscription.paystack_subscription_code,
+        "previous_authorization_code": subscription.authorization_code,
     })
     set_metadata(subscription, metadata)
     subscription.reference = reference
@@ -361,8 +365,9 @@ async def change_subscription_plan(
             }
         raise HTTPException(status_code=409, detail="A different subscription change is already scheduled.")
 
+    old_subscription_code = subscription.paystack_subscription_code
     try:
-        existing_result = await fetch_subscription(subscription.paystack_subscription_code)
+        existing_result = await fetch_subscription(old_subscription_code)
         period_end = parse_datetime((existing_result.get("data") or {}).get("next_payment_date"))
         if not period_end:
             raise PaystackError("Could not determine the current subscription end date from Paystack")
@@ -377,7 +382,7 @@ async def change_subscription_plan(
         new_code = (new_result.get("data") or {}).get("subscription_code")
         if not new_code:
             raise PaystackError("Paystack did not return the replacement subscription code")
-        await disable_subscription(subscription.paystack_subscription_code, subscription.paystack_email_token or "")
+        await disable_subscription(old_subscription_code, subscription.paystack_email_token or "")
     except PaystackError as exc:
         raise HTTPException(status_code=502, detail=str(exc)) from exc
 
@@ -386,7 +391,7 @@ async def change_subscription_plan(
         "pending_interval": interval,
         "pending_subscription_code": new_code,
         "pending_start_date": start_date,
-        "old_subscription_code": subscription.paystack_subscription_code,
+        "old_subscription_code": old_subscription_code,
     })
     set_metadata(subscription, metadata)
     subscription.cancel_at_period_end = True
@@ -444,6 +449,7 @@ async def verify_payment(
         return {"status": data.get("status", "failed"), "reference": reference}
 
     metadata = get_metadata(subscription)
+    is_upgrade = bool(metadata.get("upgrade") and metadata.get("pending_upgrade_reference") == reference)
     payment_plan = metadata.get("pending_plan") or metadata.get("plan") or subscription.plan
     payment_interval = metadata.get("pending_interval") or metadata.get("interval") or "month"
 
@@ -454,8 +460,122 @@ async def verify_payment(
     customer = data.get("customer") or {}
     authorization_code = authorization.get("authorization_code")
     channel = str(data.get("channel") or "").lower()
-    recurring = bool(authorization_code) and bool(data.get("subscription_code"))
     paid_at = parse_datetime(data.get("paid_at")) or now_utc()
+
+    # Upgrade payments are deliberately one-time. After Paystack confirms the
+    # prorated charge, create the new recurring subscription with the new
+    # authorization, then disable the old subscription. We persist the new
+    # subscription code before disabling the old one so a retry can finish the
+    # operation safely if the request is interrupted.
+    if is_upgrade:
+        if not authorization_code:
+            raise HTTPException(status_code=502, detail="Upgrade payment did not return a reusable authorization code")
+        if not subscription.paystack_customer_code and not customer.get("customer_code"):
+            raise HTTPException(status_code=400, detail="Paystack customer information is missing")
+
+        old_subscription_code = metadata.get("previous_subscription_code") or subscription.paystack_subscription_code
+        if not old_subscription_code:
+            raise HTTPException(status_code=400, detail="Previous Paystack subscription code is missing")
+
+        new_subscription_code = metadata.get("pending_upgrade_subscription_code")
+        if not new_subscription_code:
+            customer_code = subscription.paystack_customer_code or customer.get("customer_code")
+            try:
+                new_result = await create_subscription(
+                    customer=customer_code,
+                    plan_code=get_plan_code(payment_plan, payment_interval),
+                    authorization_code=authorization_code,
+                )
+                new_subscription_code = (new_result.get("data") or {}).get("subscription_code")
+                if not new_subscription_code:
+                    raise PaystackError("Paystack did not return the new subscription code")
+            except PaystackError as exc:
+                raise HTTPException(status_code=502, detail=str(exc)) from exc
+
+            metadata["pending_upgrade_subscription_code"] = new_subscription_code
+            metadata["upgrade_payment_authorization_code"] = authorization_code
+            set_metadata(subscription, metadata)
+            await db.commit()
+
+        # The old subscription is disabled only after the upgrade payment has
+        # succeeded and the replacement subscription exists.
+        try:
+            await disable_subscription(old_subscription_code, subscription.paystack_email_token or "")
+        except PaystackError as exc:
+            metadata["upgrade_cleanup_pending"] = True
+            metadata["old_subscription_code"] = old_subscription_code
+            metadata["pending_upgrade_subscription_code"] = new_subscription_code
+            set_metadata(subscription, metadata)
+            subscription.last_event = "subscription.upgrade.old_subscription_disable_pending"
+            subscription.updated_at = now_utc()
+            await db.commit()
+            raise HTTPException(
+                status_code=502,
+                detail="Upgrade succeeded, but the previous subscription could not be disabled. Retry verification to finish cleanup.",
+            ) from exc
+
+        try:
+            new_remote = await fetch_subscription(new_subscription_code)
+            new_remote_data = new_remote.get("data") or {}
+            period_start = parse_datetime(new_remote_data.get("start")) or paid_at
+            period_end = parse_datetime(new_remote_data.get("next_payment_date"))
+        except PaystackError:
+            period_start = paid_at
+            period_end = None
+
+        if not period_end:
+            period_end = add_billing_period(period_start, payment_interval)
+
+        subscription.plan = payment_plan
+        subscription.status = "active"
+        subscription.reference = reference
+        subscription.authorization_code = authorization_code
+        subscription.paystack_customer_code = subscription.paystack_customer_code or customer.get("customer_code")
+        subscription.paystack_subscription_code = new_subscription_code
+        subscription.current_period_start = period_start
+        subscription.current_period_end = period_end
+        subscription.cancel_at_period_end = False
+        subscription.last_event = "subscription.upgrade.completed"
+        subscription.updated_at = now_utc()
+
+        metadata["interval"] = payment_interval
+        metadata["recurring"] = True
+        metadata["payment_channel"] = channel or "unknown"
+        metadata["last_payment_reference"] = reference
+        metadata["old_subscription_code"] = old_subscription_code
+        metadata["previous_plan"] = metadata.get("previous_plan")
+        metadata["previous_interval"] = metadata.get("previous_interval")
+        metadata["upgrade_completed"] = True
+        metadata.pop("pending_plan", None)
+        metadata.pop("pending_interval", None)
+        metadata.pop("pending_upgrade_reference", None)
+        metadata.pop("pending_upgrade_subscription_code", None)
+        metadata.pop("upgrade_cleanup_pending", None)
+        metadata.pop("upgrade_amount", None)
+        metadata.pop("upgrade_amount_kobo", None)
+        metadata.pop("upgrade", None)
+        set_metadata(subscription, metadata)
+
+        current_user.plan = payment_plan
+        current_user.subscription_status = "active"
+        current_user.subscription_ends_at = period_end
+        await db.commit()
+
+        return {
+            "status": "success",
+            "payment_method": "recurring",
+            "payment_channel": channel or "unknown",
+            "plan": payment_plan,
+            "interval": payment_interval,
+            "subscription_status": current_user.subscription_status,
+            "subscription_ends_at": current_user.subscription_ends_at,
+            "reference": reference,
+            "subscription_code": new_subscription_code,
+            "old_subscription_code": old_subscription_code,
+        }
+
+    authorization_code = authorization.get("authorization_code")
+    recurring = bool(authorization_code) and bool(data.get("subscription_code"))
 
     if recurring:
         subscription_code = data.get("subscription_code")
