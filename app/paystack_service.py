@@ -28,8 +28,17 @@ async def paystack_request(method: str, path: str, *, payload: Optional[dict[str
         raise PaystackError(data.get("message") or "Paystack request was unsuccessful")
     return data
 
-async def initialize_transaction(*, email: str, plan_code: str, reference: str, callback_url: str, metadata: dict[str, Any]) -> dict[str, Any]:
-    return await paystack_request("POST", "/transaction/initialize", payload={"email": email, "plan": plan_code, "reference": reference, "callback_url": callback_url, "metadata": json.dumps(metadata)})
+async def initialize_transaction(*, email: str, plan_code: str, reference: str, callback_url: str, metadata: dict[str, Any], amount_naira: int | None = None) -> dict[str, Any]:
+    payload: dict[str, Any] = {
+        "email": email,
+        "plan": plan_code,
+        "reference": reference,
+        "callback_url": callback_url,
+        "metadata": json.dumps(metadata),
+    }
+    if amount_naira is not None:
+        payload["amount"] = int(amount_naira) * 100
+    return await paystack_request("POST", "/transaction/initialize", payload=payload)
 
 async def verify_transaction(reference: str) -> dict[str, Any]:
     return await paystack_request("GET", f"/transaction/verify/{reference}")
@@ -63,6 +72,12 @@ async def list_plans(*, page: int = 1, per_page: int = 100) -> dict[str, Any]:
 async def fetch_customer(customer_code: str) -> dict[str, Any]:
     return await paystack_request("GET", f"/customer/{customer_code}")
 
+async def fetch_subscription(subscription_code: str) -> dict[str, Any]:
+    return await paystack_request("GET", f"/subscription/{subscription_code}")
+
+async def fetch_plan(plan_code: str) -> dict[str, Any]:
+    return await paystack_request("GET", f"/plan/{plan_code}")
+
 async def create_subscription(*, customer: str, plan_code: str, authorization_code: str | None = None, start_date: str | None = None) -> dict[str, Any]:
     payload: dict[str, Any] = {"customer": customer, "plan": plan_code}
     if authorization_code: payload["authorization"] = authorization_code
@@ -72,9 +87,6 @@ async def create_subscription(*, customer: str, plan_code: str, authorization_co
 async def list_subscr(*, page: int = 1, per_page: int = 100) -> dict[str, Any]:
     """List Paystack subscriptions for reconciliation/backfill."""
     return await paystack_request("GET", "/subscription", params={"page": page, "perPage": per_page})
-
-async def fetch_subscription(subscription_code: str) -> dict[str, Any]:
-    return await paystack_request("GET", f"/subscription/{subscription_code}")
 
 async def fetch_customer_subscriptions(customer_id: int) -> dict[str, Any]:
     return await paystack_request("GET", "/subscription", params={"customer": customer_id, "perPage": 100, "page": 1})
