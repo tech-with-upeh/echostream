@@ -1,7 +1,7 @@
 """Add immutable subscription upgrade records.
 
 Revision ID: 20260906_subscription_upgrades
-Revises: 20260904_payment_history_method
+Revises: 54848436c361
 """
 
 from typing import Sequence, Union
@@ -10,7 +10,7 @@ from alembic import op
 import sqlalchemy as sa
 
 revision: str = "20260906_subscription_upgrades"
-down_revision: Union[str, Sequence[str], None] = "20260904_payment_history_method"
+down_revision: Union[str, Sequence[str], None] = "54848436c361"
 branch_labels: Union[str, Sequence[str], None] = None
 depends_on: Union[str, Sequence[str], None] = None
 
