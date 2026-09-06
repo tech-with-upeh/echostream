@@ -3,6 +3,12 @@ import uuid
 from sqlalchemy import Column, Integer, String, Boolean, ForeignKey, DateTime, Text, UniqueConstraint, event
 from sqlalchemy.orm import relationship
 from app.database import Base
+# Registers DBSubscriptionUpgrade on Base.metadata. Without this import,
+# anything that inspects Base.metadata (most importantly alembic's
+# --autogenerate) has no idea this model/table exists, and will conclude
+# subscription_upgrades is an orphaned table that should be DROPPED - which
+# is exactly what happened and produced a real migration that deletes it.
+from app.subscription_upgrade import DBSubscriptionUpgrade  # noqa: F401
 
 UTCDateTime = DateTime(timezone=True)
 
@@ -13,7 +19,7 @@ class DBUser(Base):
 
 
 class DBAudioAsset(Base):
-    __tablename__="audio_assets"; __table_args__=(UniqueConstraint("r2_key"),); id=Column(Integer,primary_key=True,index=True); name=Column(String,nullable=False); r2_key=Column(String,nullable=False,index=True); public_url=Column(String,unique=True,nullable=False); owner_user_id=Column(Integer,ForeignKey("users.id",ondelete="CASCADE"),nullable=True,index=True); created_at=Column(UTCDateTime,nullable=False); updated_at=Column(UTCDateTime,nullable=False); owner=relationship("DBUser",back_populates="audio_assets")
+    __tablename__="audio_assets"; id=Column(Integer,primary_key=True,index=True); name=Column(String,nullable=False); r2_key=Column(String,nullable=False,unique=True,index=True); public_url=Column(String,unique=True,nullable=False); owner_user_id=Column(Integer,ForeignKey("users.id",ondelete="CASCADE"),nullable=True,index=True); created_at=Column(UTCDateTime,nullable=False); updated_at=Column(UTCDateTime,nullable=False); owner=relationship("DBUser",back_populates="audio_assets")
 
 
 class DBUserSession(Base):

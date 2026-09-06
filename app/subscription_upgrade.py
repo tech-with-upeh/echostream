@@ -4,9 +4,8 @@ from app.database import Base
 
 class DBSubscriptionUpgrade(Base):
     __tablename__ = "subscription_upgrades"
-    __table_args__ = (UniqueConstraint("reference"),)
-
-    id = Column(Integer, primary_key=True, index=True)
+    
+    id = Column(Integer, primary_key=True)
     user_id = Column(Integer, ForeignKey("users.id", ondelete="CASCADE"), nullable=False, index=True)
     subscription_id = Column(Integer, ForeignKey("subscriptions.id", ondelete="SET NULL"), nullable=True, index=True)
 

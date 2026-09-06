@@ -48,12 +48,11 @@ def upgrade() -> None:
         sa.Column("completed_at", sa.DateTime(timezone=True), nullable=True),
         sa.Column("created_at", sa.DateTime(timezone=True), nullable=False),
         sa.Column("updated_at", sa.DateTime(timezone=True), nullable=False),
-        sa.UniqueConstraint("reference"),
-        sa.UniqueConstraint("payment_reference"),
     )
     op.create_index("ix_subscription_upgrades_user_id", "subscription_upgrades", ["user_id"])
     op.create_index("ix_subscription_upgrades_subscription_id", "subscription_upgrades", ["subscription_id"])
-    op.create_index("ix_subscription_upgrades_payment_reference", "subscription_upgrades", ["payment_reference"])
+    op.create_index("ix_subscription_upgrades_reference", "subscription_upgrades", ["reference"], unique=True)
+    op.create_index("ix_subscription_upgrades_payment_reference", "subscription_upgrades", ["payment_reference"], unique=True)
     op.create_index("ix_subscription_upgrades_new_subscription_code", "subscription_upgrades", ["new_subscription_code"])
     op.create_index("ix_subscription_upgrades_status", "subscription_upgrades", ["status"])
 
@@ -62,6 +61,7 @@ def downgrade() -> None:
     op.drop_index("ix_subscription_upgrades_status", table_name="subscription_upgrades")
     op.drop_index("ix_subscription_upgrades_new_subscription_code", table_name="subscription_upgrades")
     op.drop_index("ix_subscription_upgrades_payment_reference", table_name="subscription_upgrades")
+    op.drop_index("ix_subscription_upgrades_reference", table_name="subscription_upgrades")
     op.drop_index("ix_subscription_upgrades_subscription_id", table_name="subscription_upgrades")
     op.drop_index("ix_subscription_upgrades_user_id", table_name="subscription_upgrades")
     op.drop_table("subscription_upgrades")

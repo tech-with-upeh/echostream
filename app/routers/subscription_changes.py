@@ -174,6 +174,7 @@ async def upgrade_quote(
     current_user: DBUser = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ):
+    print("SUb cganges")
     context = await get_upgrade_context(db, current_user, plan, interval)
     return {
         "current_plan": context["current_plan"],

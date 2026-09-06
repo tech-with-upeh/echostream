@@ -414,6 +414,7 @@ async def finalize_upgrade_reference(db: AsyncSession, reference: str, user: DBU
 
 @router.post("/upgrade/quote")
 async def upgrade_quote(plan: str, interval: str, current_user: DBUser = Depends(get_current_user), db: AsyncSession = Depends(get_db)):
+    print("upgrade")
     context = await get_upgrade_context(db, current_user, plan, interval)
     return {"current_plan": context["current_plan"], "current_interval": context["current_interval"], "new_plan": context["new_plan"], "new_interval": context["new_interval"], "currency": "NGN", "current_plan_price": context["current_plan_price"], "new_plan_price": context["new_plan_price"], "billing_interval": context["new_interval"], "current_period_start": context["period_start"], "current_period_ends_at": context["period_end"], "total_days": context["total_days"], "remaining_days": context["remaining_days"], "unused_value": context["unused_value"], "credit_applied": context["unused_value"], "upgrade_amount": context["upgrade_amount"], "credit_remaining": 0, "first_debit": context["first_debit"]}
 
