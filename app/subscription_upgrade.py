@@ -25,8 +25,8 @@ class DBSubscriptionUpgrade(Base):
     new_subscription_code = Column(String, nullable=True, index=True)
     new_authorization_code = Column(String, nullable=True)
 
-    total_days = Column(Integer, nullable=False, default=0)
-    remaining_days = Column(Integer, nullable=False, default=0)
+    total_seconds = Column(Integer, nullable=False, default=0)
+    remaining_seconds = Column(Integer, nullable=False, default=0)
     old_plan_price_kobo = Column(Integer, nullable=False)
     new_plan_price_kobo = Column(Integer, nullable=False)
     unused_value_kobo = Column(Integer, nullable=False, default=0)
