@@ -25,6 +25,7 @@ from app.paystack_service import (
 router = APIRouter(prefix="/payments", tags=["Payments"])
 PAID_PLANS = {"essential", "pro"}
 VALID_INTERVALS = {"month", "year"}
+PLAN_RANK = {"essential": 1, "pro": 2}
 
 
 def now_utc() -> datetime:
@@ -111,6 +112,7 @@ async def get_upgrade_context(db: AsyncSession, current_user: DBUser, plan: str,
         raise HTTPException(status_code=400, detail="Current subscription billing interval is unavailable")
     if not recurring or not subscription.authorization_code or not subscription.paystack_subscription_code:
         raise HTTPException(status_code=400, detail="An active recurring subscription is required for an upgrade")
+    print("curr plan: ", current_plan, "->> plan: ", plan, "->> curr interv : ", current_interval, "->> interval: ", interval)
     if current_plan == plan and current_interval == interval:
         raise HTTPException(status_code=400, detail="You are already on this plan and billing interval")
 
@@ -119,13 +121,17 @@ async def get_upgrade_context(db: AsyncSession, current_user: DBUser, plan: str,
         target_plan_data = await fetch_plan(get_plan_code(plan, interval))
         current_remote = await fetch_subscription(subscription.paystack_subscription_code)
     except PaystackError as exc:
+        print("fetches : ", str(exc))
         raise HTTPException(status_code=502, detail=str(exc)) from exc
 
     current_price_kobo = int((current_plan_data.get("data") or {}).get("amount") or 0)
     target_price_kobo = int((target_plan_data.get("data") or {}).get("amount") or 0)
     if current_price_kobo <= 0 or target_price_kobo <= 0:
+        print("couldnt determine ")
         raise HTTPException(status_code=502, detail="Could not determine subscription prices from Paystack")
-    if target_price_kobo <= current_price_kobo:
+    #if target_price_kobo <= current_price_kobo:
+        #raise HTTPException(status_code=400, detail="The selected subscription is not an upgrade")
+    if PLAN_RANK.get(plan, 0) <= PLAN_RANK.get(current_plan, 0):
         raise HTTPException(status_code=400, detail="The selected subscription is not an upgrade")
 
     remote_data = current_remote.get("data") or {}
@@ -203,6 +209,7 @@ async def create_target_subscription(*, subscription: DBSubscription, plan: str,
     data = result.get("data") or {}
     if not data.get("subscription_code"):
         raise PaystackError("Paystack did not return the new subscription code")
+    print("creating sub async resp :", data)
     return data
 
 
@@ -221,6 +228,7 @@ async def complete_upgrade(db: AsyncSession, current_user: DBUser, subscription:
             target_data = None
     if not target_code:
         try:
+            print("---->>",context["new_plan"], context["new_interval"], authorization_code, context["first_debit"])
             target_data = await create_target_subscription(subscription=subscription, plan=context["new_plan"], interval=context["new_interval"], authorization_code=authorization_code, first_debit=context["first_debit"])
             target_code = target_data.get("subscription_code")
             metadata["pending_upgrade_subscription_code"] = target_code
@@ -228,6 +236,7 @@ async def complete_upgrade(db: AsyncSession, current_user: DBUser, subscription:
             set_metadata(subscription, metadata)
             await db.commit()
         except PaystackError as exc:
+            print("create sub :", exc)
             raise HTTPException(status_code=502, detail=str(exc)) from exc
 
     try:
@@ -240,6 +249,7 @@ async def complete_upgrade(db: AsyncSession, current_user: DBUser, subscription:
         subscription.last_event = "subscription.upgrade.old_subscription_disable_pending"
         subscription.updated_at = now_utc()
         await db.commit()
+        print("disable old : ", str(exc))
         raise HTTPException(status_code=502, detail="Upgrade payment succeeded, but the old subscription could not be cancelled yet. No upgrade completion was recorded; retry verification to finish the transition.") from exc
 
     paid_at = paid_at or now_utc()
@@ -277,55 +287,7 @@ async def complete_upgrade(db: AsyncSession, current_user: DBUser, subscription:
     await db.commit()
     return {"status": "success", "payment_method": "recurring", "payment_channel": payment_channel or "unknown", "plan": context["new_plan"], "interval": context["new_interval"], "subscription_status": current_user.subscription_status, "subscription_ends_at": period_end, "reference": payment_reference, "subscription_code": target_code, "old_subscription_code": old_code, "old_subscription_status": str(old_data.get("status") or "cancelled").lower(), "credit_remaining": 0, "first_debit": context["first_debit"]}
 
-
-@router.post("/upgrade/quote")
-async def upgrade_quote(plan: str, interval: str, current_user: DBUser = Depends(get_current_user), db: AsyncSession = Depends(get_db)):
-    context = await get_upgrade_context(db, current_user, plan, interval)
-    return {"current_plan": context["current_plan"], "current_interval": context["current_interval"], "new_plan": context["new_plan"], "new_interval": context["new_interval"], "currency": "NGN", "current_plan_price": context["current_plan_price"], "new_plan_price": context["new_plan_price"], "billing_interval": context["new_interval"], "current_period_start": context["period_start"], "current_period_ends_at": context["period_end"], "total_days": context["total_days"], "remaining_days": context["remaining_days"], "unused_value": context["unused_value"], "credit_applied": context["unused_value"], "upgrade_amount": context["upgrade_amount"], "credit_remaining": 0, "first_debit": context["first_debit"]}
-
-
-@router.post("/upgrade")
-async def upgrade_subscription(plan: str, interval: str, current_user: DBUser = Depends(get_current_user), db: AsyncSession = Depends(get_db)):
-    context = await get_upgrade_context(db, current_user, plan, interval)
-    subscription = context["subscription"]
-    metadata = context["metadata"]
-    pending_reference = metadata.get("pending_upgrade_reference")
-    if pending_reference:
-        return {"status": "already_pending", "new_plan": context["new_plan"], "new_interval": context["new_interval"], "reference": pending_reference}
-
-    if context["upgrade_amount_kobo"] == 0:
-        reference = f"echostream_upgrade_credit_{current_user.id}_{now_utc().strftime('%Y%m%d%H%M%S%f')}"
-        try:
-            result = await create_target_subscription(subscription=subscription, plan=context["new_plan"], interval=context["new_interval"], authorization_code=subscription.authorization_code, first_debit=context["first_debit"])
-            target_code = result["subscription_code"]
-            metadata.update({"upgrade": True, "pending_plan": context["new_plan"], "pending_interval": context["new_interval"], "pending_upgrade_reference": reference, "pending_upgrade_subscription_code": target_code, "previous_plan": context["current_plan"], "previous_interval": context["current_interval"], "previous_subscription_code": subscription.paystack_subscription_code, "upgrade_amount": 0, "upgrade_amount_kobo": 0, "upgrade_credit_kobo": 0, "upgrade_first_debit": context["first_debit"].isoformat()})
-            set_metadata(subscription, metadata)
-            subscription.reference = reference
-            subscription.last_event = "subscription.upgrade.credit_pending_cleanup"
-            subscription.updated_at = now_utc()
-            await db.commit()
-        except PaystackError as exc:
-            raise HTTPException(status_code=502, detail=str(exc)) from exc
-        result = await complete_upgrade(db, current_user, subscription, context, payment_reference=reference, authorization_code=subscription.authorization_code, payment_channel=subscription.payment_method or "card")
-        return {**result, "amount_due": 0}
-
-    reference = f"echostream_upgrade_{current_user.id}_{now_utc().strftime('%Y%m%d%H%M%S%f')}"
-    try:
-        result = await initialize_transaction(email=current_user.email, reference=reference, callback_url=settings.PAYSTACK_CALLBACK_URL, metadata={"user_id": current_user.id, "plan": context["new_plan"], "interval": context["new_interval"], "purpose": "upgrade", "upgrade": True, "previous_plan": context["current_plan"], "previous_interval": context["current_interval"], "previous_subscription_code": subscription.paystack_subscription_code, "unused_value_kobo": context["unused_value_kobo"], "upgrade_amount_kobo": context["upgrade_amount_kobo"], "credit_remaining_kobo": 0, "first_debit": context["first_debit"].isoformat()}, amount_kobo=context["upgrade_amount_kobo"])
-    except PaystackError as exc:
-        raise HTTPException(status_code=502, detail=str(exc)) from exc
-    data = result.get("data") or {}
-    reference = data.get("reference") or reference
-    metadata.update({"pending_plan": context["new_plan"], "pending_interval": context["new_interval"], "pending_upgrade_reference": reference, "upgrade": True, "upgrade_amount": context["upgrade_amount"], "upgrade_amount_kobo": context["upgrade_amount_kobo"], "upgrade_credit_kobo": 0, "previous_plan": context["current_plan"], "previous_interval": context["current_interval"], "previous_subscription_code": subscription.paystack_subscription_code, "previous_authorization_code": subscription.authorization_code, "upgrade_first_debit": context["first_debit"].isoformat()})
-    set_metadata(subscription, metadata)
-    subscription.reference = reference
-    subscription.last_event = "subscription.upgrade.payment_pending"
-    subscription.updated_at = now_utc()
-    await db.commit()
-    return {"status": "payment_required", "current_plan": context["current_plan"], "current_interval": context["current_interval"], "new_plan": context["new_plan"], "new_interval": context["new_interval"], "upgrade_amount": context["upgrade_amount"], "currency": "NGN", "reference": reference, "authorization_url": data.get("authorization_url"), "access_code": data.get("access_code"), "first_debit": context["first_debit"], "credit_remaining": 0}
-
-
-async def finalize_upgrade_reference(db: AsyncSession, reference: str, user: DBUser) -> dict:
+async def finalize_upgrade_reference(db: AsyncSession, reference: str, user: DBUser, ctx: dict = None) -> dict:
     result = await db.execute(select(DBSubscription).where(DBSubscription.user_id == user.id))
     subscription = result.scalar_one_or_none()
     if not subscription:
@@ -339,6 +301,7 @@ async def finalize_upgrade_reference(db: AsyncSession, reference: str, user: DBU
     try:
         payment = await verify_transaction(reference)
     except PaystackError as exc:
+        print("verify txn", str(exc))
         raise HTTPException(status_code=502, detail=str(exc)) from exc
     data = payment.get("data") or {}
     if str(data.get("status") or "").lower() != "success":
@@ -356,11 +319,101 @@ async def finalize_upgrade_reference(db: AsyncSession, reference: str, user: DBU
     interval = metadata.get("pending_interval") or metadata.get("interval")
     if plan not in PAID_PLANS or interval not in VALID_INTERVALS:
         raise HTTPException(status_code=400, detail="Upgrade metadata is invalid")
-    context = await get_upgrade_context(db, user, plan, interval)
-    first_debit = parse_datetime(metadata.get("upgrade_first_debit"))
-    if first_debit:
-        context["first_debit"] = first_debit
-    return await complete_upgrade(db, user, subscription, context, payment_reference=reference, authorization_code=authorization_code, payment_channel=str(data.get("channel") or "unknown").lower(), paid_at=parse_datetime(data.get("paid_at")) or now_utc(), payment_amount_kobo=int(data.get("amount") or 0))
+    # Deliberately NOT calling get_upgrade_context() here. That function
+    # re-validates eligibility against the subscription's CURRENT live state:
+    # live Paystack pricing, the old subscription's live period dates, the
+    # tier-rank check, and "is this the same plan you're already on." But
+    # the plan/interval for this upgrade were already decided and already
+    # paid for back when /upgrade was first called - re-running those
+    # checks here means a fully-paid, legitimate upgrade can be rejected for
+    # reasons that have nothing to do with whether it should be finalized
+    # (e.g. the old plan's period ticks past its end while the user is
+    # still on the checkout page, or - as seen in practice - current_plan
+    # already reads back as the target plan on a retried finalize, tripping
+    # the "already on this plan" guard). complete_upgrade() only ever reads
+    # new_plan/new_interval/first_debit from context, so that's all we
+    # build here.
+    first_debit = parse_datetime(metadata.get("upgrade_first_debit")) or now_utc()
+    context = {"new_plan": plan, "new_interval": interval, "first_debit": first_debit}
+    return await complete_upgrade(db, user, subscription, ctx, payment_reference=reference, authorization_code=authorization_code, payment_channel=str(data.get("channel") or "unknown").lower(), paid_at=parse_datetime(data.get("paid_at")) or now_utc(), payment_amount_kobo=int(data.get("amount") or 0))
+
+
+@router.post("/upgrade/quote")
+async def upgrade_quote(plan: str, interval: str, current_user: DBUser = Depends(get_current_user), db: AsyncSession = Depends(get_db)):
+    context = await get_upgrade_context(db, current_user, plan, interval)
+    return {"current_plan": context["current_plan"], "current_interval": context["current_interval"], "new_plan": context["new_plan"], "new_interval": context["new_interval"], "currency": "NGN", "current_plan_price": context["current_plan_price"], "new_plan_price": context["new_plan_price"], "billing_interval": context["new_interval"], "current_period_start": context["period_start"], "current_period_ends_at": context["period_end"], "total_days": context["total_days"], "remaining_days": context["remaining_days"], "unused_value": context["unused_value"], "credit_applied": context["unused_value"], "upgrade_amount": context["upgrade_amount"], "credit_remaining": 0, "first_debit": context["first_debit"]}
+
+
+@router.post("/upgrade")
+async def upgrade_subscription(plan: str, interval: str, current_user: DBUser = Depends(get_current_user), db: AsyncSession = Depends(get_db)):
+    print("ppplannn: ", plan, " =======> interval: ", interval)
+    context = await get_upgrade_context(db, current_user, plan, interval)
+    subscription = context["subscription"]
+    metadata = context["metadata"] 
+    pending_reference = metadata.get("pending_upgrade_reference")
+    print("<---->>")
+    if pending_reference:
+        try:
+            payment = await verify_transaction(pending_reference)
+            pending_status = str((payment.get("data") or {}).get("status") or "").lower()
+        except PaystackError as exc:
+            print("verify txn", str(exc))
+            pending_status = "unknown"
+
+        if pending_status == "success":
+            # self-heal: the payment actually went through, finish it now
+            print("use here")
+            return await finalize_upgrade_reference(db, pending_reference, current_user, ctx=context)
+
+        if pending_status in {"failed", "abandoned", "reversed"}:
+            # dead attempt - clear it and fall through to create a fresh one
+            for key in ("pending_plan", "pending_interval", "pending_upgrade_reference",
+                    "pending_upgrade_subscription_code", "upgrade",
+                    "upgrade_amount", "upgrade_amount_kobo"):
+                metadata.pop(key, None)
+            set_metadata(subscription, metadata)
+            await db.commit()
+        else:
+            # genuinely still in flight
+            return {"status": "already_pending", "new_plan": context["new_plan"],
+                "new_interval": context["new_interval"], "reference": pending_reference} 
+
+
+    if context["upgrade_amount_kobo"] == 0:
+        reference = f"echostream_upgrade_credit_{current_user.id}_{now_utc().strftime('%Y%m%d%H%M%S%f')}"
+        try:
+            print("upgrade ammt == 0: ", context["new_plan"], context["new_interval"])
+            result = await create_target_subscription(subscription=subscription, plan=context["new_plan"], interval=context["new_interval"], authorization_code=subscription.authorization_code, first_debit=context["first_debit"])
+            target_code = result["subscription_code"]
+            metadata.update({"upgrade": True, "pending_plan": context["new_plan"], "pending_interval": context["new_interval"], "pending_upgrade_reference": reference, "pending_upgrade_subscription_code": target_code, "previous_plan": context["current_plan"], "previous_interval": context["current_interval"], "previous_subscription_code": subscription.paystack_subscription_code, "upgrade_amount": 0, "upgrade_amount_kobo": 0, "upgrade_credit_kobo": 0, "upgrade_first_debit": context["first_debit"].isoformat()})
+            set_metadata(subscription, metadata)
+            subscription.reference = reference
+            subscription.last_event = "subscription.upgrade.credit_pending_cleanup"
+            subscription.updated_at = now_utc()
+            await db.commit()
+        except PaystackError as exc:
+            print("subb ",str(exc))
+            raise HTTPException(status_code=502, detail=str(exc)) from exc
+        result = await complete_upgrade(db, current_user, subscription, context, payment_reference=reference, authorization_code=subscription.authorization_code, payment_channel=subscription.payment_method or "card")
+        return {**result, "amount_due": 0}
+
+    reference = f"echostream_upgrade_{current_user.id}_{now_utc().strftime('%Y%m%d%H%M%S%f')}"
+    try:
+        result = await initialize_transaction(email=current_user.email, reference=reference, callback_url=settings.PAYSTACK_CALLBACK_URL, metadata={"user_id": current_user.id, "plan": context["new_plan"], "interval": context["new_interval"], "purpose": "upgrade", "upgrade": True, "previous_plan": context["current_plan"], "previous_interval": context["current_interval"], "previous_subscription_code": subscription.paystack_subscription_code, "unused_value_kobo": context["unused_value_kobo"], "upgrade_amount_kobo": context["upgrade_amount_kobo"], "credit_remaining_kobo": 0, "first_debit": context["first_debit"].isoformat()}, amount_kobo=context["upgrade_amount_kobo"])
+    except PaystackError as exc:
+        print("init txn", str(exc))
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
+    data = result.get("data") or {}
+    reference = data.get("reference") or reference
+    metadata.update({"pending_plan": context["new_plan"], "pending_interval": context["new_interval"], "pending_upgrade_reference": reference, "upgrade": True, "upgrade_amount": context["upgrade_amount"], "upgrade_amount_kobo": context["upgrade_amount_kobo"], "upgrade_credit_kobo": 0, "previous_plan": context["current_plan"], "previous_interval": context["current_interval"], "previous_subscription_code": subscription.paystack_subscription_code, "previous_authorization_code": subscription.authorization_code, "upgrade_first_debit": context["first_debit"].isoformat()})
+    set_metadata(subscription, metadata)
+    subscription.reference = reference
+    subscription.last_event = "subscription.upgrade.payment_pending"
+    subscription.updated_at = now_utc()
+    await db.commit()
+    return {"status": "payment_required", "current_plan": context["current_plan"], "current_interval": context["current_interval"], "new_plan": context["new_plan"], "new_interval": context["new_interval"], "upgrade_amount": context["upgrade_amount"], "currency": "NGN", "reference": reference, "authorization_url": data.get("authorization_url"), "access_code": data.get("access_code"), "first_debit": context["first_debit"], "credit_remaining": 0}
+
+
 
 
 @router.get("/verify/{reference}")
