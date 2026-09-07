@@ -99,6 +99,25 @@ async def verify_transaction(reference: str) -> dict[str, Any]:
     return await paystack_request("GET", f"/transaction/verify/{reference}")
 
 
+async def charge_authorization(
+    *,
+    email: str,
+    authorization_code: str,
+    reference: str,
+    amount_kobo: int,
+    metadata: dict[str, Any],
+) -> dict[str, Any]:
+    """Silently charge a saved card via its authorization code (no redirect/checkout)."""
+    payload = {
+        "email": email,
+        "authorization_code": authorization_code,
+        "reference": reference,
+        "amount": int(amount_kobo),
+        "metadata": json.dumps(metadata),
+    }
+    return await paystack_request("POST", "/transaction/charge_authorization", payload=payload)
+
+
 async def list_transactions(
     *,
     customer: str | int | None = None,

@@ -14,8 +14,10 @@ from app.dependencies import get_current_user, get_db
 from app.models import DBPaymentHistory, DBSubscription, DBUser
 from app.paystack_service import (
     PaystackError,
+    charge_authorization,
     create_subscription,
     disable_subscription,
+    fetch_customer_subscriptions_by_code,
     fetch_plan,
     fetch_subscription,
     get_plan_code,
@@ -141,7 +143,7 @@ async def get_upgrade_context(db: AsyncSession, current_user: DBUser, plan: str,
         raise HTTPException(status_code=502, detail="Could not determine subscription prices from Paystack")
 
     remote_data = current_remote.get("data") or {}
-    period_start = parse_datetime(remote_data.get("start")) or subscription.current_period_start
+    period_start = parse_datetime(remote_data.get("start")) or subscription.updated_at
     period_end = parse_datetime(remote_data.get("next_payment_date")) or subscription.current_period_end
     if not period_start or not period_end:
         raise HTTPException(status_code=400, detail="Could not determine the current billing period")
@@ -257,16 +259,37 @@ async def disable_old_subscription(subscription_code: str, local_email_token: st
 async def create_target_subscription(*, subscription: DBSubscription, upgrade: DBSubscriptionUpgrade, authorization_code: str) -> dict:
     if not subscription.paystack_customer_code:
         raise PaystackError("Paystack customer information is missing")
-    result = await create_subscription(
-        customer=subscription.paystack_customer_code,
-        plan_code=get_plan_code(upgrade.new_plan, upgrade.new_interval),
-        authorization_code=authorization_code,
-        start_date=upgrade.first_debit.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S+00:00"),
-    )
+    plan_code = get_plan_code(upgrade.new_plan, upgrade.new_interval)
+    try:
+        result = await create_subscription(
+            customer=subscription.paystack_customer_code,
+            plan_code=plan_code,
+            authorization_code=authorization_code,
+            start_date=upgrade.first_debit.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S+00:00"),
+        )
+    except PaystackError:
+        # A prior attempt may have already created this subscription at Paystack
+        # before our own commit landed. Look for it instead of failing outright.
+        existing = await _find_existing_target_subscription(subscription.paystack_customer_code, plan_code)
+        if existing:
+            return existing
+        raise
     data = result.get("data") or {}
     if not data.get("subscription_code"):
         raise PaystackError("Paystack did not return the new subscription code")
     return data
+
+
+async def _find_existing_target_subscription(customer_code: str, plan_code: str) -> dict | None:
+    try:
+        subs = (await fetch_customer_subscriptions_by_code(customer_code)).get("data") or []
+    except PaystackError:
+        return None
+    matches = [s for s in subs if (s.get("plan") or {}).get("plan_code") == plan_code and str(s.get("status") or "").lower() in ("active", "non-renewing")]
+    if not matches:
+        return None
+    matches.sort(key=lambda s: s.get("createdAt") or "", reverse=True)
+    return matches[0]
 
 
 async def complete_upgrade(db: AsyncSession, user: DBUser, subscription: DBSubscription, upgrade: DBSubscriptionUpgrade, *, authorization_code: str, payment_channel: str, paid_at: datetime | None = None, payment_amount_kobo: int = 0) -> dict:
@@ -475,12 +498,44 @@ async def upgrade_subscription(plan: str, interval: str, current_user: DBUser = 
     if context["upgrade_amount_kobo"] == 0:
         return await complete_upgrade(db, current_user, subscription, upgrade, authorization_code=subscription.authorization_code or "", payment_channel=subscription.payment_method or "card")
 
+    txn_metadata = {"user_id": current_user.id, "purpose": "upgrade", "upgrade_reference": reference, "plan": context["new_plan"], "interval": context["new_interval"], "previous_plan": context["current_plan"], "previous_interval": context["current_interval"], "previous_subscription_code": subscription.paystack_subscription_code, "unused_value_kobo": context["unused_value_kobo"], "upgrade_amount_kobo": context["upgrade_amount_kobo"], "first_debit": context["first_debit"].isoformat()}
+    upgrade.payment_reference = reference
+    upgrade.updated_at = now_utc()
+    await db.commit()
+
+    # Recurring subscription => we already hold a reusable authorization code.
+    # Try to silently debit it first; only fall back to a hosted checkout if the
+    # direct charge can't be attempted or Paystack declines it.
+    if subscription.authorization_code:
+        try:
+            charge_result = await charge_authorization(
+                email=current_user.email,
+                authorization_code=subscription.authorization_code,
+                reference=reference,
+                amount_kobo=context["upgrade_amount_kobo"],
+                metadata=txn_metadata,
+            )
+            charge_data = charge_result.get("data") or {}
+            if str(charge_data.get("status") or "").lower() == "success":
+                paid_at = parse_datetime(charge_data.get("paid_at")) or now_utc()
+                amount = int(charge_data.get("amount") or context["upgrade_amount_kobo"])
+                channel = str(charge_data.get("channel") or "card").lower()
+                new_auth = (charge_data.get("authorization") or {}).get("authorization_code") or subscription.authorization_code
+                upgrade.status = "payment_success"
+                upgrade.payment_amount_kobo = amount
+                upgrade.payment_channel = channel
+                upgrade.updated_at = now_utc()
+                await db.commit()
+                return await complete_upgrade(db, current_user, subscription, upgrade, authorization_code=new_auth, payment_channel=channel, paid_at=paid_at, payment_amount_kobo=amount)
+        except PaystackError:
+            pass  # can't silently charge this authorization; fall back to hosted checkout below
+
     try:
         result = await initialize_transaction(
             email=current_user.email,
             reference=reference,
             callback_url=settings.PAYSTACK_CALLBACK_URL,
-            metadata={"user_id": current_user.id, "purpose": "upgrade", "upgrade_reference": reference, "plan": context["new_plan"], "interval": context["new_interval"], "previous_plan": context["current_plan"], "previous_interval": context["current_interval"], "previous_subscription_code": subscription.paystack_subscription_code, "unused_value_kobo": context["unused_value_kobo"], "upgrade_amount_kobo": context["upgrade_amount_kobo"], "first_debit": context["first_debit"].isoformat()},
+            metadata=txn_metadata,
             amount_kobo=context["upgrade_amount_kobo"],
         )
     except PaystackError as exc:
