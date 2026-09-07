@@ -14,7 +14,7 @@ class DBSubscriptionUpgrade(Base):
 
     old_plan = Column(String, nullable=False)
     old_interval = Column(String, nullable=False)
-    old_subscription_code = Column(String, nullable=False)
+    old_subscription_code = Column(String, nullable=True)
     old_authorization_code = Column(String, nullable=True)
     old_period_start = Column(DateTime(timezone=True), nullable=True)
     old_period_end = Column(DateTime(timezone=True), nullable=True)
