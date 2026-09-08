@@ -278,7 +278,10 @@ async def create_target_subscription(*, subscription: DBSubscription, upgrade: D
         if existing:
             return existing
         raise
+    print("result:::  ", result)
     data = result.get("data") or {}
+    if result.get("message") == "Subscription successfully created":
+        data["ispending"] = True
     if not data.get("subscription_code"):
         raise PaystackError("Paystack did not return the new subscription code")
     return data
@@ -320,6 +323,10 @@ async def complete_upgrade(db: AsyncSession, user: DBUser, subscription: DBSubsc
             upgrade.updated_at = now_utc()
             await db.commit()
             raise HTTPException(status_code=502, detail=str(exc)) from exc
+        print("upgradeeeee--->:",target_data)
+        if target_data.get("ispending"):
+            return {"status": "pending", "payment_method": "recurring", "payment_channel": payment_channel or "unknown", "plan": upgrade.new_plan, "interval": upgrade.new_interval, "subscription_status": user.subscription_status, "subscription_ends_at": upgrade.old_period_end, "reference": upgrade.payment_reference or upgrade.reference, "subscription_code": upgrade.new_subscription_code, "old_subscription_code": upgrade.old_subscription_code, "old_subscription_status": "pending", "credit_applied": upgrade.unused_value_kobo / 100, "upgrade_amount": upgrade.upgrade_amount_kobo / 100, "first_debit": upgrade.first_debit}
+ 
         upgrade.new_subscription_code = target_data["subscription_code"]
         upgrade.new_authorization_code = (target_data.get("authorization") or {}).get("authorization_code") or authorization_code
         upgrade.status = "subscription_created"
