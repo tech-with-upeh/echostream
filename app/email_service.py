@@ -28,7 +28,7 @@ async def send_combined_verification_email(email: str, token: str, code: str):
     await FastMail(conf).send_message(MessageSchema(subject="Verify Your Email Address", recipients=[email], body=html_content, subtype=MessageType.html))
 
 async def send_combined_reset_pass_email(email: str, token: str, code: str):
-    reset_url = f"{settings.FRONTEND_URL}/dashboard/personal-info?token={token}"
+    reset_url = f"{settings.FRONTEND_URL}/reset-password?token={token}"
     html_content = f"""
     <h3>Reset Your EchoStream Password</h3>
     <p>We received a request to reset your EchoStream account password.</p>
