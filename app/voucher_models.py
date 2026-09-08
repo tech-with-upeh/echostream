@@ -1,4 +1,5 @@
-from sqlalchemy import Boolean, Column, DateTime, ForeignKey, Index, Integer, String, Text, UniqueConstraint, text
+from sqlalchemy import Boolean, Column, DateTime, ForeignKey, Integer, String, Text, UniqueConstraint
+from sqlalchemy.orm import relationship
 
 from app.database import Base
 
@@ -12,7 +13,7 @@ class DBRedeemCode(Base):
     id = Column(Integer, primary_key=True, index=True)
     code_hash = Column(String, nullable=False, index=True)
     code_prefix = Column(String, nullable=False, index=True)
-    kind = Column(String, nullable=False, index=True)
+    kind = Column(String, nullable=False, index=True)  # subscription | voucher
     plan = Column(String, nullable=True, index=True)
     duration_days = Column(Integer, nullable=True)
     credit_kobo = Column(Integer, nullable=False, default=0)
@@ -29,15 +30,7 @@ class DBRedeemCode(Base):
 
 class DBRedeemCodeRedemption(Base):
     __tablename__ = "redeem_code_redemptions"
-    __table_args__ = (
-        Index(
-            "uq_redeem_code_redemptions_active_user",
-            "redeem_code_id",
-            "user_id",
-            unique=True,
-            postgresql_where=text("status IN ('pending', 'consumed')"),
-        ),
-    )
+    __table_args__ = (UniqueConstraint("redeem_code_id", "user_id"),)
 
     id = Column(Integer, primary_key=True, index=True)
     redeem_code_id = Column(Integer, ForeignKey("redeem_codes.id", ondelete="CASCADE"), nullable=False, index=True)
