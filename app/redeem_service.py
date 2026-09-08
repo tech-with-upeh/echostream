@@ -55,9 +55,26 @@ async def validate_code(db: AsyncSession, code: str, *, kind: str | None = None,
         if int(consumed or 0) >= item.max_redemptions:
             raise ValueError("This code has reached its redemption limit")
     if user_id is not None:
-        existing = await db.scalar(select(DBRedeemCodeRedemption.id).where(DBRedeemCodeRedemption.redeem_code_id == item.id, DBRedeemCodeRedemption.user_id == user_id, DBRedeemCodeRedemption.status == "consumed"))
+        existing = await db.scalar(
+            select(DBRedeemCodeRedemption)
+            .where(
+                DBRedeemCodeRedemption.redeem_code_id == item.id,
+                DBRedeemCodeRedemption.user_id == user_id,
+            )
+            .order_by(DBRedeemCodeRedemption.id.desc())
+            .limit(1)
+        )
         if existing:
-            raise ValueError("You have already used this code")
+            if existing.status == "consumed":
+                raise ValueError("You have already used this code")
+            if existing.status == "pending":
+                raise ValueError("This code is already being used in another checkout")
+            if existing.status == "cancelled":
+                # Cancelled checkout attempts did not consume the voucher.
+                # Remove the stale row so the unique (code,user) constraint does
+                # not prevent a legitimate retry.
+                await db.delete(existing)
+                await db.flush()
     return item
 
 
