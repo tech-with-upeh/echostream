@@ -1,5 +1,4 @@
-from sqlalchemy import Boolean, Column, DateTime, ForeignKey, Integer, String, Text, UniqueConstraint
-from sqlalchemy.orm import relationship
+from sqlalchemy import Boolean, Column, DateTime, ForeignKey, Index, Integer, String, Text, UniqueConstraint, text
 
 from app.database import Base
 
@@ -13,7 +12,7 @@ class DBRedeemCode(Base):
     id = Column(Integer, primary_key=True, index=True)
     code_hash = Column(String, nullable=False, index=True)
     code_prefix = Column(String, nullable=False, index=True)
-    kind = Column(String, nullable=False, index=True)  # subscription | voucher
+    kind = Column(String, nullable=False, index=True)
     plan = Column(String, nullable=True, index=True)
     duration_days = Column(Integer, nullable=True)
     credit_kobo = Column(Integer, nullable=False, default=0)
@@ -30,7 +29,15 @@ class DBRedeemCode(Base):
 
 class DBRedeemCodeRedemption(Base):
     __tablename__ = "redeem_code_redemptions"
-    __table_args__ = (UniqueConstraint("redeem_code_id", "user_id"),)
+    __table_args__ = (
+        Index(
+            "uq_redeem_code_redemptions_active_user",
+            "redeem_code_id",
+            "user_id",
+            unique=True,
+            postgresql_where=text("status IN ('pending', 'consumed')"),
+        ),
+    )
 
     id = Column(Integer, primary_key=True, index=True)
     redeem_code_id = Column(Integer, ForeignKey("redeem_codes.id", ondelete="CASCADE"), nullable=False, index=True)
@@ -50,7 +57,7 @@ class DBUserCredit(Base):
     __table_args__ = (UniqueConstraint("user_id"),)
 
     id = Column(Integer, primary_key=True, index=True)
-    user_id = Column(Integer, ForeignKey("users.id", ondelete="CASCADE"), nullable=False, index=True)
+    user_id = Column(Integer, primary_key=False, nullable=False, unique=True, index=True)
     balance_kobo = Column(Integer, nullable=False, default=0)
     created_at = Column(UTCDateTime, nullable=False)
     updated_at = Column(UTCDateTime, nullable=False)
@@ -62,7 +69,7 @@ class DBUserCreditLedger(Base):
     user_id = Column(Integer, ForeignKey("users.id", ondelete="CASCADE"), nullable=False, index=True)
     amount_kobo = Column(Integer, nullable=False)
     balance_after_kobo = Column(Integer, nullable=False)
-    kind = Column(String, nullable=False)  # voucher_redeem | checkout_apply | adjustment
+    kind = Column(String, nullable=False)
     reference = Column(String, nullable=False, unique=True, index=True)
     redeem_code_id = Column(Integer, ForeignKey("redeem_codes.id", ondelete="SET NULL"), nullable=True, index=True)
     metadata_json = Column(Text, nullable=True)
