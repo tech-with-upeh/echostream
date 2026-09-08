@@ -8,7 +8,7 @@ from app.live_runtime import command_listener, owner_heartbeat
 from app.rate_limit import RedisRateLimitMiddleware
 from app.redis_store import close_redis, ping_redis
 from app.paystack_service import close_paystack_client
-from app.routers import auth, gifts, live, payments, payment_receipts, payment_reconciliation, prefrences, subscription_changes, upgrade, voice, wstts, sounds
+from app.routers import auth, gifts, live, payments, payment_receipts, payment_reconciliation, prefrences, subscription_changes, upgrade, voice, wstts, sounds, redeem
 import app.models
 
 
@@ -53,6 +53,7 @@ app.include_router(live.router)
 app.include_router(prefrences.router)
 app.include_router(gifts.router)
 app.include_router(sounds.router)
+app.include_router(redeem.router)
 # Register upgrade routes before the generic payment callback/verify/webhook
 # routes so upgrade transactions always use the upgrade state machine.
 app.include_router(upgrade.router)
