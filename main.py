@@ -34,9 +34,9 @@ app = FastAPI(title="EchoStream Backend API", lifespan=lifespan)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=[
-        "http://localhost:3000",
-        "http://127.0.0.1:3000",
-        "http://172.20.10.6:3000"
+        "https://echostreams.app",
+        "https://echostream-web.vercel.app",
+        "https://172.20.10.6:3000"
         # your production frontend URL goes here
     ],
     allow_credentials=True,
