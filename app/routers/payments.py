@@ -700,19 +700,34 @@ async def manage_subscription(
         else:
             local_status = "active"
             can_renew = True
+        # return {
+        #     "type": "one_time",
+        #     "status": local_status,
+        #     "plan": current_user.plan,
+        #     "interval": interval,
+        #     "payment_method": "one_time",
+        #     "payment_channel": payment_channel,
+        #     "payment_method_details": payment_method_details,
+        #     "subscription_ends_at": subscription_end,
+        #     "can_cancel": False,
+        #     "can_renew": can_renew,
+        #     "management_link": None,
+        # }
         return {
-            "type": "one_time",
-            "status": local_status,
-            "plan": current_user.plan,
-            "interval": interval,
-            "payment_method": "one_time",
-            "payment_channel": payment_channel,
-            "payment_method_details": payment_method_details,
-            "subscription_ends_at": subscription_end,
-            "can_cancel": False,
-            "can_renew": can_renew,
-            "management_link": None,
-        }
+        "type": "one_time",
+        "link": None,
+        "management_link": None,
+        "plan": current_user.plan,
+        "interval": interval,
+        "payment_method": "one_time",
+        "payment_channel": payment_channel,
+        "payment_method_details": payment_method_details,
+        "subscription_status": local_status,
+        "subscription_ends_at": ensure_utc(current_user.subscription_ends_at),
+        "subscription_code": None,
+        "can_cancel": False,
+        "can_renew":can_renew,
+    }
 
     subscription_code = subscription.paystack_subscription_code
     if not subscription_code and subscription.paystack_customer_code:
@@ -762,12 +777,12 @@ async def manage_subscription(
         raise HTTPException(status_code=502, detail="Paystack did not return a subscription management link")
 
     return {
-        "type": "recurring",
+        "type": subscription.status,
         "link": link,
         "management_link": link,
         "plan": current_user.plan,
         "interval": interval,
-        "payment_method": "recurring",
+        "payment_method": subscription.status,
         "payment_channel": payment_channel,
         "payment_method_details": payment_method_details,
         "subscription_status": current_user.subscription_status,

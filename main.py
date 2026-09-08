@@ -9,7 +9,6 @@ from app.rate_limit import RedisRateLimitMiddleware
 from app.redis_store import close_redis, ping_redis
 from app.paystack_service import close_paystack_client
 from app.routers import auth, gifts, live, payments, payment_receipts, payment_reconciliation, prefrences, subscription_changes, upgrade, voice, wstts, sounds
-from app.routers import paystack_webhook
 import app.models
 
 
@@ -59,7 +58,6 @@ app.include_router(sounds.router)
 app.include_router(upgrade.router)
 # Register reconciliation routes before the generic payments routes.
 app.include_router(payment_reconciliation.router)
-app.include_router(paystack_webhook.router)
 app.include_router(payments.router)
 app.include_router(payment_receipts.router)
 app.include_router(subscription_changes.router)

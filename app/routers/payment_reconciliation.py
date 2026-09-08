@@ -28,6 +28,153 @@ VALID_INTERVALS = {"month", "year"}
 RECURRING_CHANNELS = {"card", "direct_debit"}
 
 
+def _update_payment_details(subscription: DBSubscription, data: dict) -> None:
+    """Persist the latest Paystack authorization without exposing secrets."""
+    authorization = data.get("authorization") or {}
+    if not isinstance(authorization, dict):
+        return
+    if authorization.get("authorization_code"):
+        subscription.authorization_code = authorization["authorization_code"]
+    method = str(data.get("channel") or authorization.get("channel") or "").strip().lower()
+    if method:
+        subscription.payment_method = method
+    for field, key in (("payment_method_brand", "brand"), ("payment_method_last4", "last4"), ("payment_method_bank", "bank"), ("payment_method_card_type", "card_type")):
+        value = str(authorization.get(key) or "").strip()
+        if value:
+            setattr(subscription, field, value)
+
+
+async def _find_subscription_by_code(db: AsyncSession, subscription_code: str | None) -> DBSubscription | None:
+    if not subscription_code:
+        return None
+    result = await db.execute(select(DBSubscription).where(DBSubscription.paystack_subscription_code == subscription_code).with_for_update())
+    return result.scalar_one_or_none()
+
+
+def _extract_subscription_code_from_refund(data: dict) -> str | None:
+    """Paystack's hosted update-card flow does a small verify-charge + refund;
+    the refund note carries the subscription code so we can refresh the card."""
+    for key in ("customer_note", "merchant_note"):
+        note = data.get(key)
+        if not isinstance(note, str):
+            continue
+        marker = "[Subscription:"
+        start = note.find(marker)
+        if start == -1:
+            continue
+        start += len(marker)
+        end = note.find("]", start)
+        if end != -1 and note[start:end].strip():
+            return note[start:end].strip()
+    return None
+
+
+async def _refresh_card_from_refund(db: AsyncSession, subscription_code: str | None) -> None:
+    subscription = await _find_subscription_by_code(db, subscription_code)
+    if not subscription:
+        # Cached code may have drifted — fetch the subscription from Paystack
+        # and fall back to matching on its customer_code before giving up.
+        try:
+            remote = (await fetch_subscription(subscription_code)).get("data") or {}
+        except PaystackError:
+            return
+        customer_code = (remote.get("customer") or {}).get("customer_code")
+        if not customer_code:
+            return
+        result = await db.execute(select(DBSubscription).where(DBSubscription.paystack_customer_code == customer_code).with_for_update())
+        subscription = result.scalars().first()
+        if not subscription:
+            return
+        if subscription.paystack_subscription_code != subscription_code:
+            subscription.paystack_subscription_code = subscription_code
+    else:
+        try:
+            remote = (await fetch_subscription(subscription_code)).get("data") or {}
+        except PaystackError:
+            return  # a later webhook or reconciliation pass can retry
+
+    _update_payment_details(subscription, remote)
+    subscription.updated_at = _now()
+    await db.commit()
+
+
+async def _find_subscription_for_lifecycle_event(db: AsyncSession, data: dict) -> DBSubscription | None:
+    """Resolve the local subscription this lifecycle event belongs to, and make
+    sure our cached subscription_code matches what Paystack actually has —
+    a strict equality lookup would silently drop the event if the two ever drift."""
+    subscription_code = data.get("subscription_code")
+    subscription = await _find_subscription_by_code(db, subscription_code)
+
+    if not subscription:
+        customer = data.get("customer") or {}
+        customer_email = customer.get("email") if isinstance(customer, dict) else None
+        if customer_email:
+            result = await db.execute(select(DBUser).where(DBUser.email == customer_email).with_for_update())
+            userID = result.scalars().first()
+            SubRes = await db.execute(select(DBSubscription).where(DBSubscription.user_id == userID.id))
+            subscription = SubRes.scalars().first()
+
+    if subscription and subscription_code and subscription.paystack_subscription_code != subscription_code:
+        subscription.paystack_subscription_code = subscription_code
+
+    return subscription
+
+
+async def _handle_subscription_not_renew(db: AsyncSession, data: dict) -> None:
+    subscription = await _find_subscription_for_lifecycle_event(db, data)
+    if not subscription:
+        return
+    user_result = await db.execute(select(DBUser).where(DBUser.id == subscription.user_id))
+    user = user_result.scalar_one_or_none()
+    if not user:
+        return
+
+    next_payment_date = _parse_dt(data.get("next_payment_date"))
+    if next_payment_date:
+        # Paystack can redeliver this webhook; don't let a stale retry roll
+        # the period end backwards past what a newer event already set.
+        current_end = subscription.current_period_end
+        if not current_end or next_payment_date >= (current_end if current_end.tzinfo else current_end.replace(tzinfo=timezone.utc)):
+            subscription.current_period_end = next_payment_date
+            user.subscription_ends_at = next_payment_date
+
+    customer = data.get("customer") or {}
+    if isinstance(customer, dict) and customer.get("customer_code"):
+        subscription.paystack_customer_code = customer["customer_code"]
+
+    _update_payment_details(subscription, data)  # this event can follow an update-card operation
+    subscription.status = "non_renewing"
+    subscription.cancel_at_period_end = True
+    subscription.last_event = "subscription.not_renew"
+    subscription.updated_at = _now()
+    user.plan = subscription.plan
+    user.subscription_status = "active"  # stays on the paid plan until the period ends
+    await db.commit()
+
+
+async def _handle_subscription_disable(db: AsyncSession, data: dict) -> None:
+    subscription = await _find_subscription_for_lifecycle_event(db, data)
+    if not subscription:
+        return
+    user_result = await db.execute(select(DBUser).where(DBUser.id == subscription.user_id))
+    user = user_result.scalar_one_or_none()
+    if not user:
+        return
+    _update_payment_details(subscription, data)
+    subscription.status = "canceled"
+    subscription.cancel_at_period_end = False
+    subscription.last_event = "subscription.disable"
+    subscription.updated_at = _now()
+    user.plan = "starter"
+    user.subscription_status = "active"
+    user.subscription_ends_at = None
+    # The Paystack subscription is gone; stop treating this row as recurring
+    # (this is what upgrade.py's `recurring` check relies on).
+    subscription.paystack_subscription_code = None
+    subscription.authorization_code = None
+    await db.commit()
+
+
 def _now() -> datetime:
     return datetime.now(timezone.utc)
 
@@ -396,9 +543,22 @@ async def paystack_webhook(request: Request, db: AsyncSession = Depends(get_db))
         await _sync_transaction(db, data, local_subscription, user)
         return {"received": True}
 
-    # Delegate non-charge lifecycle events to the established subscription
-    # state machine. It does not create payment-history rows for lifecycle
-    # events such as subscription.not_renew.
+    if event == "subscription.not_renew":
+        await _handle_subscription_not_renew(db, data)
+        return {"received": True}
+
+    if event == "subscription.disable":
+        await _handle_subscription_disable(db, data)
+        return {"received": True}
+
+    if event.startswith("refund."):
+        subscription_code = _extract_subscription_code_from_refund(data)
+        if subscription_code:
+            await _refresh_card_from_refund(db, subscription_code)
+        return {"received": True}
+
+    # subscription.create and anything else still use the existing
+    # subscription state machine in payments.py.
     from app.routers.payments import apply_subscription_event
 
     await apply_subscription_event(db, event, data)
