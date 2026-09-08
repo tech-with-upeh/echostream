@@ -57,7 +57,7 @@ class DBUserCredit(Base):
     __table_args__ = (UniqueConstraint("user_id"),)
 
     id = Column(Integer, primary_key=True, index=True)
-    user_id = Column(Integer, primary_key=False, nullable=False, unique=True, index=True)
+    user_id = Column(Integer, ForeignKey("users.id", ondelete="CASCADE"), nullable=False, index=True)
     balance_kobo = Column(Integer, nullable=False, default=0)
     created_at = Column(UTCDateTime, nullable=False)
     updated_at = Column(UTCDateTime, nullable=False)
