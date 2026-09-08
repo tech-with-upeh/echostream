@@ -282,8 +282,6 @@ async def upgrade_subscription_with_voucher(
         context["account_credit_applied_kobo"],
     )
 
-    # If the credit balance changed between the quote and the locked request,
-    # recompute the payable amount from what was actually reserved.
     if account_credit_applied != context["account_credit_applied_kobo"]:
         context["account_credit_applied_kobo"] = account_credit_applied
         context["total_credit_kobo"] = context["unused_value_kobo"] + account_credit_applied + context["voucher_credit_applied_kobo"]
@@ -354,41 +352,48 @@ async def upgrade_subscription_with_voucher(
 
     if context["recurring"] and subscription.authorization_code:
         try:
-            charge_result = await charge_authorization(
-                email=current_user.email,
+            result = await charge_authorization(
                 authorization_code=subscription.authorization_code,
-                reference=reference,
+                email=subscription.email or current_user.email,
                 amount_kobo=context["upgrade_amount_kobo"],
+                reference=reference,
                 metadata=txn_metadata,
             )
-            charge_data = charge_result.get("data") or {}
-            if str(charge_data.get("status") or "").lower() == "success":
-                paid_at = parse_datetime(charge_data.get("paid_at")) or now_utc()
-                amount = int(charge_data.get("amount") or context["upgrade_amount_kobo"])
-                channel = str(charge_data.get("channel") or "card").lower()
-                new_auth = (charge_data.get("authorization") or {}).get("authorization_code") or subscription.authorization_code
-                upgrade.status = "payment_success"
-                upgrade.payment_amount_kobo = amount
-                upgrade.payment_channel = channel
-                upgrade.updated_at = now_utc()
-                await db.commit()
-                result = await complete_upgrade(db, current_user, subscription, upgrade, authorization_code=new_auth, payment_channel=channel, paid_at=paid_at, payment_amount_kobo=amount)
-                await settle_voucher(db, upgrade, success=result.get("status") == "success")
-                await db.commit()
-                return result
-        except PaystackError:
-            pass
-        except Exception:
-            await fail_upgrade(db, upgrade, "Upgrade completion failed")
-            raise
+        except PaystackError as exc:
+            await fail_upgrade(db, upgrade, str(exc))
+            raise HTTPException(status_code=502, detail=str(exc)) from exc
+
+        data = result.get("data") or {}
+        upgrade.payment_reference = data.get("reference") or reference
+        upgrade.payment_channel = data.get("channel") or "card"
+        upgrade.updated_at = now_utc()
+        await db.commit()
+
+        payment_status = str(data.get("status") or "").lower()
+        if payment_status == "success":
+            return await finalize_and_settle(db, upgrade.payment_reference, current_user)
+
+        return {
+            "status": "payment_required",
+            "current_plan": context["current_plan"],
+            "current_interval": context["current_interval"],
+            "new_plan": context["new_plan"],
+            "new_interval": context["new_interval"],
+            "upgrade_amount": context["upgrade_amount"],
+            "currency": "NGN",
+            "reference": upgrade.payment_reference,
+            "first_debit": context["first_debit"],
+            "credit_applied": context["total_credit_kobo"] / 100,
+            "credit_remaining": max(context["account_credit_available_kobo"] - context["account_credit_applied_kobo"], 0) / 100,
+        }
 
     try:
         result = await initialize_transaction(
             email=current_user.email,
+            amount_kobo=context["upgrade_amount_kobo"],
             reference=reference,
             callback_url=settings.PAYSTACK_CALLBACK_URL,
             metadata=txn_metadata,
-            amount_kobo=context["upgrade_amount_kobo"],
         )
     except PaystackError as exc:
         await fail_upgrade(db, upgrade, str(exc))
@@ -420,8 +425,12 @@ async def verify_upgrade_with_voucher(reference: str, current_user: DBUser = Dep
     upgrade = await get_upgrade_by_reference(db, reference)
     if upgrade and upgrade.user_id == current_user.id:
         return await finalize_and_settle(db, reference, current_user)
-    from app.routers.upgrade import verify_upgrade_or_delegate
-    return await verify_upgrade_or_delegate(reference, current_user, db)
+
+    # This router shadows the generic /payments/verify/{reference} route.
+    # Normal non-upgrade payments must therefore delegate directly to the
+    # reconciliation router instead of importing a helper that does not exist.
+    from app.routers.payment_reconciliation import verify_payment as reconciliation_verify_payment
+    return await reconciliation_verify_payment(reference, current_user, db)
 
 
 @router.get("/callback", include_in_schema=False)
@@ -459,17 +468,19 @@ async def upgrade_webhook_with_voucher(request: Request, db: AsyncSession = Depe
     event = str(payload.get("event") or "")
     data = payload.get("data") or {}
     reference = data.get("reference")
-    upgrade = await get_upgrade_by_reference(db, reference) if reference else None
-    if upgrade:
-        user = await db.scalar(select(DBUser).where(DBUser.id == upgrade.user_id))
-        if not user:
-            raise HTTPException(status_code=404, detail="User not found")
-        if event == "charge.failed":
-            await fail_upgrade(db, upgrade, "Paystack charge.failed webhook")
-            return {"received": True}
-        if event == "charge.success":
+    if event in {"charge.success", "charge.failed"} and reference:
+        upgrade = await get_upgrade_by_reference(db, reference)
+        if upgrade:
+            user_result = await db.execute(select(DBUser).where(DBUser.id == upgrade.user_id))
+            user = user_result.scalar_one_or_none()
+            if not user:
+                raise HTTPException(status_code=404, detail="User not found")
+            if event == "charge.failed":
+                if upgrade.status != "completed":
+                    await fail_upgrade(db, upgrade, "Paystack charge.failed webhook")
+                return {"received": True}
             await finalize_and_settle(db, reference, user)
             return {"received": True}
 
-    from app.routers.upgrade import upgrade_webhook
-    return await upgrade_webhook(request, db)
+    from app.routers.payment_reconciliation import paystack_webhook as reconciliation_webhook
+    return await reconciliation_webhook(request, db)
