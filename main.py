@@ -8,7 +8,7 @@ from app.live_runtime import command_listener, owner_heartbeat
 from app.rate_limit import RedisRateLimitMiddleware
 from app.redis_store import close_redis, ping_redis
 from app.paystack_service import close_paystack_client
-from app.routers import auth, gifts, live, payments, payment_receipts, payment_reconciliation, prefrences, subscription_changes, upgrade, voice, wstts, sounds, redeem
+from app.routers import auth, gifts, live, payments, payment_receipts, payment_reconciliation, prefrences, subscription_changes, upgrade, upgrade_voucher, voice, wstts, sounds, redeem
 import app.models
 
 
@@ -54,6 +54,10 @@ app.include_router(prefrences.router)
 app.include_router(gifts.router)
 app.include_router(sounds.router)
 app.include_router(redeem.router)
+# Voucher-aware upgrade routes must be registered before the generic upgrade
+# routes so the optional voucher_code query parameter is handled by the
+# authoritative voucher-aware quote/upgrade state machine.
+app.include_router(upgrade_voucher.router)
 # Register upgrade routes before the generic payment callback/verify/webhook
 # routes so upgrade transactions always use the upgrade state machine.
 app.include_router(upgrade.router)
