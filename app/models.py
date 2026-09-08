@@ -43,7 +43,7 @@ class DBSubscription(Base):
 
 
 class DBPaymentHistory(Base):
-    __tablename__="payment_history"; __table_args__=(UniqueConstraint("reference"), UniqueConstraint("payment_id"), UniqueConstraint("receipt_number")); id=Column(Integer,primary_key=True,index=True); user_id=Column(Integer,ForeignKey("users.id",ondelete="CASCADE"),nullable=False,index=True); subscription_id=Column(Integer,ForeignKey("subscriptions.id",ondelete="SET NULL"),nullable=True,index=True); payment_id=Column(String,nullable=False,index=True); receipt_number=Column(String,nullable=False,index=True); provider=Column(String,nullable=False,default="paystack"); provider_reference=Column(String,nullable=False); billing_type=Column(String,nullable=False,default="unknown"); method=Column(String,nullable=True); method_brand=Column(String,nullable=True); method_last4=Column(String,nullable=True); reference=Column(String,nullable=False,index=True); plan=Column(String,nullable=False); interval=Column(String,nullable=True); amount=Column(Integer,nullable=True); currency=Column(String,nullable=False,default="NGN"); status=Column(String,nullable=False); event=Column(String,nullable=False); paid_at=Column(UTCDateTime,nullable=True); created_at=Column(UTCDateTime,nullable=False); user=relationship("DBUser",back_populates="payment_history")
+    __tablename__="payment_history"; __table_args__=(UniqueConstraint("reference"), UniqueConstraint("payment_id"), UniqueConstraint("receipt_number")); id=Column(Integer,primary_key=True,index=True); user_id=Column(Integer,ForeignKey("users.id",ondelete="CASCADE"),nullable=False,index=True); subscription_id=Column(Integer,ForeignKey("subscriptions.id",ondelete="SET NULL"),nullable=True,index=True); payment_id=Column(String,nullable=False,index=True); receipt_number=Column(String,nullable=False,index=True); provider=Column(String,nullable=False,default="paystack"); provider_reference=Column(String,nullable=False); billing_type=Column(String,nullable=False,default="unknown"); method=Column(String,nullable=True); method_brand=Column(String,nullable=True); method_last4=Column(String,nullable=True); method_bank=Column(String,nullable=True); method_card_type=Column(String,nullable=True); reference=Column(String,nullable=False,index=True); plan=Column(String,nullable=False); interval=Column(String,nullable=True); amount=Column(Integer,nullable=True); currency=Column(String,nullable=False,default="NGN"); status=Column(String,nullable=False); event=Column(String,nullable=False); paid_at=Column(UTCDateTime,nullable=True); created_at=Column(UTCDateTime,nullable=False); user=relationship("DBUser",back_populates="payment_history")
 
 
 @event.listens_for(DBPaymentHistory, "before_insert")
@@ -82,3 +82,42 @@ class DBFishVoice(Base):
 
 class DBMutedUser(Base):
     __tablename__="muted_users"; __table_args__=(UniqueConstraint("owner_id","tiktok_username"),); id=Column(Integer,primary_key=True,index=True); owner_id=Column(Integer,ForeignKey("users.id",ondelete="CASCADE"),nullable=False,index=True); tiktok_user_id=Column(String,nullable=True,index=True); tiktok_username=Column(String,nullable=False); reason=Column(String,nullable=False,default="manual"); created_at=Column(UTCDateTime,nullable=False); owner=relationship("DBUser",back_populates="muted_users")
+
+
+class DBRedeemCode(Base):
+    __tablename__ = "redeem_codes"
+    __table_args__ = (UniqueConstraint("code_hash"),)
+
+    id = Column(Integer, primary_key=True, index=True)
+    code_hash = Column(String, nullable=False, index=True)
+    code_prefix = Column(String, nullable=False, index=True)
+    kind = Column(String, nullable=False, index=True)  # subscription | voucher
+    plan = Column(String, nullable=True, index=True)
+    duration_days = Column(Integer, nullable=True)
+    credit_kobo = Column(Integer, nullable=False, default=0)
+    max_redemptions = Column(Integer, nullable=True)
+    redemption_count = Column(Integer, nullable=False, default=0)
+    starts_at = Column(UTCDateTime, nullable=True)
+    expires_at = Column(UTCDateTime, nullable=True, index=True)
+    is_active = Column(Boolean, nullable=False, default=True, index=True)
+    created_by = Column(Integer, ForeignKey("users.id", ondelete="SET NULL"), nullable=True, index=True)
+    metadata_json = Column(Text, nullable=True)
+    created_at = Column(UTCDateTime, nullable=False)
+    updated_at = Column(UTCDateTime, nullable=False)
+
+
+class DBRedeemCodeRedemption(Base):
+    __tablename__ = "redeem_code_redemptions"
+    __table_args__ = (UniqueConstraint("redeem_code_id", "user_id"),)
+
+    id = Column(Integer, primary_key=True, index=True)
+    redeem_code_id = Column(Integer, ForeignKey("redeem_codes.id", ondelete="CASCADE"), nullable=False, index=True)
+    user_id = Column(Integer, ForeignKey("users.id", ondelete="CASCADE"), nullable=False, index=True)
+    status = Column(String, nullable=False, default="pending", index=True)  # pending | consumed | cancelled
+    plan = Column(String, nullable=True)
+    duration_days = Column(Integer, nullable=True)
+    credit_kobo = Column(Integer, nullable=False, default=0)
+    checkout_reference = Column(String, nullable=True, unique=True, index=True)
+    redeemed_at = Column(UTCDateTime, nullable=True)
+    created_at = Column(UTCDateTime, nullable=False)
+    updated_at = Column(UTCDateTime, nullable=False)
