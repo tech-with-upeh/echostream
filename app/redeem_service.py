@@ -6,7 +6,8 @@ from datetime import datetime, timezone
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.models import DBRedeemCode, DBRedeemCodeRedemption, DBUser
+from app.models import DBUser
+from app.voucher_models import DBRedeemCode, DBRedeemCodeRedemption
 
 CODE_ALPHABET = string.ascii_uppercase + string.digits
 
@@ -36,14 +37,7 @@ async def get_code(db: AsyncSession, code: str, *, lock: bool = False) -> DBRede
     return result.scalar_one_or_none()
 
 
-async def validate_code(
-    db: AsyncSession,
-    code: str,
-    *,
-    kind: str | None = None,
-    user_id: int | None = None,
-    lock: bool = False,
-) -> DBRedeemCode:
+async def validate_code(db: AsyncSession, code: str, *, kind: str | None = None, user_id: int | None = None, lock: bool = False) -> DBRedeemCode:
     item = await get_code(db, code, lock=lock)
     if not item:
         raise ValueError("Invalid redeem code")
@@ -56,59 +50,16 @@ async def validate_code(
         raise ValueError("This code has expired")
     if kind and item.kind != kind:
         raise ValueError("This code cannot be used here")
-
     if item.max_redemptions is not None:
-        consumed = await db.scalar(
-            select(func.count(DBRedeemCodeRedemption.id)).where(
-                DBRedeemCodeRedemption.redeem_code_id == item.id,
-                DBRedeemCodeRedemption.status.in_(["pending", "consumed"]),
-            )
-        )
+        consumed = await db.scalar(select(func.count(DBRedeemCodeRedemption.id)).where(DBRedeemCodeRedemption.redeem_code_id == item.id, DBRedeemCodeRedemption.status == "consumed"))
         if int(consumed or 0) >= item.max_redemptions:
             raise ValueError("This code has reached its redemption limit")
-
     if user_id is not None:
-        existing = await db.scalar(
-            select(DBRedeemCodeRedemption.id).where(
-                DBRedeemCodeRedemption.redeem_code_id == item.id,
-                DBRedeemCodeRedemption.user_id == user_id,
-                DBRedeemCodeRedemption.status.in_(["pending", "consumed"]),
-            )
-        )
+        existing = await db.scalar(select(DBRedeemCodeRedemption.id).where(DBRedeemCodeRedemption.redeem_code_id == item.id, DBRedeemCodeRedemption.user_id == user_id, DBRedeemCodeRedemption.status == "consumed"))
         if existing:
             raise ValueError("You have already used this code")
-
     return item
 
 
-async def consume_redemption(
-    db: AsyncSession,
-    redemption: DBRedeemCodeRedemption,
-    *,
-    plan: str | None = None,
-    duration_days: int | None = None,
-    credit_kobo: int = 0,
-    reference: str | None = None,
-) -> None:
-    redemption.status = "consumed"
-    redemption.plan = plan
-    redemption.duration_days = duration_days
-    redemption.credit_kobo = credit_kobo
-    redemption.checkout_reference = reference
-    redemption.redeemed_at = now_utc()
-
-    code = await db.get(DBRedeemCode, redemption.redeem_code_id, with_for_update=True)
-    if code:
-        code.redemption_count = (code.redemption_count or 0) + 1
-        code.updated_at = now_utc()
-
-
 def new_redemption(*, code: DBRedeemCode, user: DBUser, reference: str | None = None) -> DBRedeemCodeRedemption:
-    return DBRedeemCodeRedemption(
-        redeem_code_id=code.id,
-        user_id=user.id,
-        status="pending",
-        checkout_reference=reference,
-        created_at=now_utc(),
-        updated_at=now_utc(),
-    )
+    return DBRedeemCodeRedemption(redeem_code_id=code.id, user_id=user.id, status="consumed", checkout_reference=reference, created_at=now_utc(), updated_at=now_utc(), redeemed_at=now_utc())
