@@ -283,7 +283,7 @@ async def voucher_checkout(plan: str, interval: str = "month", current_user: DBU
     return {"status": "pending", "authorization_url": data["authorization_url"], "access_code": data.get("access_code"), "reference": reference, "plan": plan, "interval": interval, "amount_due": due / 100, "credit_applied": applied / 100}
 
 
-@router.post("/checkout/verify/{reference}")
+@router.get("/checkout/verify/{reference}")
 async def verify_voucher_checkout(reference: str, current_user: DBUser = Depends(get_current_user), db: AsyncSession = Depends(get_db)):
     subscription = await db.scalar(select(DBSubscription).where(DBSubscription.user_id == current_user.id, DBSubscription.reference == reference).with_for_update())
     if not subscription:
