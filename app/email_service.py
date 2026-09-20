@@ -3,7 +3,7 @@ from pathlib import Path
 from fastapi_mail import ConnectionConfig, FastMail, MessageSchema, MessageType
 from app.config import settings
 
-
+print("STARTTLS =", settings.MAIL_STARTTLS, type(settings.MAIL_STARTTLS))
 use_credentials = bool(
     settings.MAIL_USERNAME and settings.MAIL_USERNAME.strip()
 )

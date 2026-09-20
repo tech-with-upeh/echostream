@@ -43,7 +43,21 @@ class TTSTextPayloadSchema(BaseModel):
     provider: str | None = None
     fish_model: str | None = None
     speed: float = Field(1.0, ge=0.5, le=2.0)
+
+"""
+id=model["_id"],
+        name=model.get("title") or "Untitled Fish voice",
+        voice_type=("cloned" if model.get("visibility") == "private" else "library"),
+        description=model.get("description") or "",
+        languages=model.get("languages") or [],
+        gender=model.get("tags")[0] if model.get("tags") else "unknown",
+        age=model.get("tags")[1] if model.get("tags") and len(model.get("tags")) > 1 else "unknown",
+        coverimage=model.get("cover_image") or "",
+        locale=model.get("languages")[0] if model.get("languages") else "unknown",
+        visibility=model.get("visibility") or "public",
+"""
 class VoiceDetailSchema(BaseModel):
+    id: str
     name: str
     short_name: str
     gender: str
@@ -55,6 +69,10 @@ class FishVoiceDetailSchema(BaseModel):
     voice_type: str = "library"
     description: str = ""
     languages: list[str] = Field(default_factory=list)
+    gender: str = "unknown"
+    age: str = "unknown"
+    coverimage: str = ""
+    locale: str = "unknown"
     visibility: str = "public"
 class TTSVoiceCatalogSchema(BaseModel):
     edge: list[VoiceDetailSchema]

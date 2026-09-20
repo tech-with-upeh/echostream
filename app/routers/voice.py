@@ -1,3 +1,4 @@
+import asyncio
 from datetime import datetime, timezone
 from typing import List
 
@@ -31,21 +32,27 @@ from app.schemas import (
 
 router = APIRouter(tags=["Text-to-Speech"])
 CACHED_VOICES: List[VoiceDetailSchema] = []
+VOICE_CACHE_LOCK = asyncio.Lock()
 
 
 async def get_all_edge_voices() -> List[VoiceDetailSchema]:
     global CACHED_VOICES
-    if not CACHED_VOICES:
-        all_voices = await edge_tts.list_voices()
-        CACHED_VOICES = [
-            VoiceDetailSchema(
-                name=v["Name"],
-                short_name=v["ShortName"],
-                gender=v["Gender"],
-                locale=v["Locale"],
-            )
-            for v in all_voices
-        ]
+    if CACHED_VOICES:
+        return CACHED_VOICES
+    async with VOICE_CACHE_LOCK:
+        if not CACHED_VOICES:
+            all_voices = await edge_tts.list_voices()
+            CACHED_VOICES = [
+                VoiceDetailSchema(
+                    id=str(i),
+                    name=v["Name"],
+                    short_name=v["ShortName"],
+                    gender=v["Gender"],
+                    locale=v["Locale"],
+                )
+                for i, v in enumerate(all_voices, start=1)
+            ]
+            
     return CACHED_VOICES
 
 
@@ -63,6 +70,10 @@ def _fish_voice_response(model: dict) -> FishVoiceDetailSchema:
         voice_type=("cloned" if model.get("visibility") == "private" else "library"),
         description=model.get("description") or "",
         languages=model.get("languages") or [],
+        gender=model.get("tags")[0] if model.get("tags") else "unknown",
+        age=model.get("tags")[1] if model.get("tags") and len(model.get("tags")) > 1 else "unknown",
+        coverimage=model.get("cover_image") or "",
+        locale=model.get("languages")[0] if model.get("languages") else "unknown",
         visibility=model.get("visibility") or "public",
     )
 
@@ -81,8 +92,7 @@ def _saved_fish_voice_response(voice: DBFishVoice) -> FishVoiceDetailSchema:
 @router.get("/v1/tts/voices", response_model=TTSVoiceCatalogSchema)
 async def list_voices(current_user: DBUser = Depends(get_current_user)):
     edge_voices = await get_all_edge_voices()
-    if current_user.plan.lower() != "pro":
-        return TTSVoiceCatalogSchema(edge=edge_voices, fish=[])
+    
     try:
         fish_models = await list_public_voice_models()
     except FishAudioError as exc:
@@ -123,9 +133,7 @@ async def text_to_speech(
     provider = (payload.provider or (prefs.tts_provider if prefs else "edge")).lower()
     if provider == "fish":
         if current_user.plan.lower() != "pro":
-            raise HTTPException(
-                status_code=403, detail="Fish Audio is available on the Pro plan."
-            )
+            payload.text = "Hey there! Welcome to EchoStream. I’m here to bring your words to life with a voice that sounds natural, clear, and expressive."
         model = payload.fish_model or (
             prefs.fish_model if prefs else settings.FISH_AUDIO_PRO_MODEL
         )

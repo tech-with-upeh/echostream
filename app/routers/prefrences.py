@@ -79,6 +79,7 @@ async def get_preferences(current_user: DBUser = Depends(get_current_user), db: 
 
 @router.put("/v1/preferences", response_model=PreferencesSchema)
 async def update_preferences(payload: PreferencesSchema, current_user: DBUser = Depends(get_current_user), db: AsyncSession = Depends(get_db)):
+    
     prefs = await _get_or_create_preferences(current_user, db)
     plan = current_user.plan.lower(); is_pro = plan == "pro"
     if payload.tts_provider == "fish" and not is_pro: raise HTTPException(403, "Fish Audio is available on the Pro plan.")
@@ -90,6 +91,7 @@ async def update_preferences(payload: PreferencesSchema, current_user: DBUser = 
     prefs.allowed_user_types = json.dumps(payload.allowed_user_types)
     prefs.blocked_words = json.dumps(payload.blocked_words)
     await db.commit(); await db.refresh(prefs)
+    print("payload", payload, _serialize(prefs))
     return _serialize(prefs)
 
 @router.get("/v1/muted-users")

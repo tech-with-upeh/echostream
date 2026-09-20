@@ -56,6 +56,7 @@ async def list_public_voice_models(page_size: int = 50) -> list[dict]:
             if response.status_code >= 400:
                 raise FishAudioError(f"Fish Audio public voice list failed ({response.status_code}): {response.text}")
             payload = response.json()
+            
             return [
                 model for model in payload.get("items", [])
                 if model.get("_id")
