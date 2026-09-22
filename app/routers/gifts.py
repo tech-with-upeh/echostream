@@ -8,16 +8,18 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import settings
 from app.dependencies import get_current_user, get_db, require_admin
-from app.gift_catalog import sync_gift_catalog
 from app.models import DBAudioAsset, DBGiftCatalogSync, DBGiftPreference, DBTikTokGift, DBUser
 from app.r2_storage import R2StorageError, delete_gift_audio, upload_audio
 from app.schemas import GiftAlertPreferenceSchema, GiftPreferenceResponse, TikTokGiftSchema
+
+from app.gift_catalog import _try_acquire_lock, start_gift_catalog_sync_task
+
 
 router = APIRouter(tags=["TikTok Gifts"])
 
 
 def _gift_to_schema(item: DBGiftPreference) -> GiftPreferenceResponse:
-    return GiftPreferenceResponse(id=item.id, gift_id=item.gift_id, gift_name=item.gift_name, enabled=item.enabled, alert_type=item.alert_type, tts_template=item.tts_template, tts_provider=item.tts_provider, voice=item.voice, fish_voice_id=item.fish_voice_id, fish_model=item.fish_model, system_sound_id=item.system_sound_id, custom_audio_id=item.custom_audio_id, custom_audio_url=item.custom_audio_url, volume=item.volume, speed=item.speed, pitch=item.pitch)
+    return GiftPreferenceResponse(id=item.id, gift_id=item.gift_id, gift_name=item.gift_name, enabled=item.enabled, alert_type=item.alert_type, tts_template=item.tts_template, tts_provider=item.tts_provider, voice=item.voice, fish_voice_id=item.fish_voice_id, fish_model=item.fish_model, system_sound_id=item.system_sound_id, custom_audio_id=item.custom_audio_id, custom_audio_url=item.custom_audio_url, volume=item.volume, speed=item.speed, pitch=item.pitch, image_url=item.image_url)
 
 
 def _is_owned_gift_audio_url(url: str | None, user_id: int) -> bool:
@@ -83,9 +85,20 @@ async def gift_catalog_sync_status(current_user: DBUser = Depends(require_admin)
     return {"status": "stale" if stale else "healthy", "stale": stale, "catalog_version": meta.catalog_version, "last_attempted_sync_at": meta.last_attempted_sync_at, "last_successful_sync_at": meta.last_successful_sync_at, "last_successful_source": meta.last_successful_source, "last_error": meta.last_error}
 
 
-@router.post("/v1/admin/gifts/sync")
+
+@router.post("/v1/admin/gifts/sync", status_code=202)
 async def manual_gift_catalog_sync(current_user: DBUser = Depends(require_admin)):
-    return await sync_gift_catalog()
+    lock_conn = await _try_acquire_lock()
+
+    if lock_conn is None:
+        raise HTTPException(
+            status_code=409,
+            detail="A gift catalog sync is already running.",
+        )
+
+    start_gift_catalog_sync_task(lock_conn)
+
+    return {"status": "started"}
 
 
 @router.get("/v1/gift-preferences", response_model=list[GiftPreferenceResponse])
@@ -107,12 +120,15 @@ async def upsert_gift_preference(gift_id: str, payload: GiftAlertPreferenceSchem
     item = result.scalar_one_or_none()
     old_audio_url = item.custom_audio_url if item else None
     if item is None:
-        item = DBGiftPreference(owner_id=current_user.id, gift_id=gift_id, gift_name=gift.name)
+        item = DBGiftPreference(owner_id=current_user.id, gift_id=gift_id, gift_name=gift.name, image_url=gift.image_url)
         db.add(item)
     else:
         item.gift_name = gift.name
+        item.image_url = gift.image_url
     for field, value in payload.model_dump().items():
         setattr(item, field, value)
+    item.gift_name = gift.name
+    item.image_url = gift.image_url
     if payload.custom_audio_id:
         asset_result = await db.execute(select(DBAudioAsset).where(DBAudioAsset.id == payload.custom_audio_id, DBAudioAsset.owner_user_id == current_user.id))
         asset = asset_result.scalar_one_or_none()

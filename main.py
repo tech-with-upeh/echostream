@@ -11,21 +11,33 @@ from app.paystack_service import close_paystack_client
 from app.routers import auth, gifts, live, payments, payment_receipts, payment_reconciliation, prefrences, subscription_changes, upgrade, upgrade_voucher, voice, wstts, sounds, redeem
 import app.models
 
+import logging
+
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s %(levelname)s %(name)s: %(message)s",
+)
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     await ping_redis()
-    gift_sync_task = asyncio.create_task(gift_catalog_scheduler())
+
     runtime_stop = asyncio.Event()
+
+    gift_sync_task = asyncio.create_task(gift_catalog_scheduler(runtime_stop))
     command_task = asyncio.create_task(command_listener(runtime_stop))
     heartbeat_task = asyncio.create_task(owner_heartbeat(runtime_stop))
+
     try:
         yield
     finally:
         runtime_stop.set()
         for task in (command_task, heartbeat_task, gift_sync_task):
             task.cancel()
-        await asyncio.gather(command_task, heartbeat_task, gift_sync_task, return_exceptions=True)
+        await asyncio.gather(
+            command_task, heartbeat_task, gift_sync_task,
+            return_exceptions=True,
+        )
         await close_redis()
         await close_paystack_client()
 

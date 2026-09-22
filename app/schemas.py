@@ -1,6 +1,6 @@
 from pydantic import BaseModel, EmailStr, Field
 from datetime import datetime
-from typing import Optional
+from typing import Literal, Optional
 
 class UserRegisterSchema(BaseModel):
     first_name: str
@@ -84,27 +84,109 @@ class AudioAssetResponse(BaseModel):
     created_at: datetime
     updated_at: datetime
     class Config: from_attributes = True
+
+from pydantic import BaseModel, Field, model_validator
+
+
 class GiftAlertPreferenceSchema(BaseModel):
     enabled: bool = True
-    alert_type: str = Field("tts", pattern="^(tts|system_sound|custom_audio)$")
+
+    alert_type: str = Field(
+        "tts",
+        pattern="^(tts|system_sound|custom_audio)$",
+    )
+
     tts_template: str | None = "{{user}} sent {{gift}}"
-    tts_provider: str | None = Field(None, pattern="^(edge|fish)$")
+
+    tts_provider: str | None = Field(
+        None,
+        pattern="^(edge|fish)$",
+    )
+
     voice: str | None = None
+
     fish_voice_id: str | None = None
-    fish_model: str | None = Field(None, pattern="^(s2-pro|s2\.1-pro-free)$")
+
+    fish_model: str | None = Field(
+        None,
+        pattern=r"^(s2-pro|s2\.1-pro-free)$",
+    )
+
     system_sound_id: str | None = None
+
     custom_audio_id: int | None = None
+
     custom_audio_url: str | None = None
-    volume: int | None = Field(None, ge=0, le=100)
-    speed: int | None = Field(None, ge=50, le=200)
+
+    volume: int | None = Field(
+        None,
+        ge=0,
+        le=100,
+    )
+
+    speed: int | None = Field(
+        None,
+        ge=50,
+        le=200,
+    )
+
     pitch: str | None = None
+
+    @model_validator(mode="after")
+    def validate_alert_type_requirements(self):
+        if self.alert_type == "tts":
+            if not self.tts_template:
+                raise ValueError(
+                    "tts_template is required for TTS alerts."
+                )
+
+            if not self.tts_provider:
+                raise ValueError(
+                    "tts_provider is required for TTS alerts."
+                )
+
+            # if self.tts_provider == "edge":
+            #     if not self.voice:
+            #         raise ValueError(
+            #             "voice is required when tts_provider is edge."
+            #         )
+
+            # elif self.tts_provider == "fish":
+            #     if not self.fish_voice_id:
+            #         raise ValueError(
+            #             "fish_voice_id is required when tts_provider is fish."
+            #         )
+
+                if not self.fish_model:
+                    raise ValueError(
+                        "fish_model is required when tts_provider is fish."
+                    )
+
+        elif self.alert_type == "system_sound":
+            if not self.system_sound_id:
+                raise ValueError(
+                    "system_sound_id is required for system sound alerts."
+                )
+
+        elif self.alert_type == "custom_audio":
+            if not self.custom_audio_id:
+                raise ValueError(
+                    "custom_audio_id is required for custom audio alerts."
+                )
+
+        return self
+
 class GiftPreferenceResponse(GiftAlertPreferenceSchema):
     id: int
     gift_id: str
     gift_name: str
+    image_url: str | None = None
 class GenericGiftPreferenceSchema(GiftAlertPreferenceSchema): pass
 class EventAlertPreferenceSchema(GiftAlertPreferenceSchema):
-    tts_template: str | None = "{{user}} {{event}}"
+    id: str | None = None
+    event_type: Literal["follow", "like", "gift"]
+    gift_id: str | None = None 
+    tts_template: str | None = "{{user}} said {{event}}"
 class EventAlertPreferenceResponse(EventAlertPreferenceSchema):
     event_type: str
 class TikTokGiftSchema(BaseModel):
