@@ -8,7 +8,7 @@ from app.live_runtime import command_listener, owner_heartbeat
 from app.rate_limit import RedisRateLimitMiddleware
 from app.redis_store import close_redis, ping_redis
 from app.paystack_service import close_paystack_client
-from app.routers import auth, gifts, live, payments, payment_receipts, payment_reconciliation, prefrences, subscription_changes, upgrade, upgrade_voucher, voice, wstts, sounds, redeem
+from app.routers import auth, gifts, live, payments, payment_receipts, payment_reconciliation, prefrences, subscription_changes, upgrade, upgrade_voucher, voice, wstts, sounds, redeem, tiktok_profile
 import app.models
 
 import logging
@@ -59,6 +59,7 @@ app.add_middleware(
 app.add_middleware(RedisRateLimitMiddleware)
 
 app.include_router(auth.router)
+app.include_router(tiktok_profile.router)
 app.include_router(voice.router)
 app.include_router(wstts.router)
 app.include_router(live.router)
