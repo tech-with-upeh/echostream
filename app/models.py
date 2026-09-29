@@ -44,6 +44,7 @@ class DBUser(Base):
     subscription_status = Column(String, nullable=False, default="active")
     trial_ends_at = Column(UTCDateTime, nullable=True)
     subscription_ends_at = Column(UTCDateTime, nullable=True)
+    tt_image = Column(String, nullable=True)
     refresh_tokens = relationship(
         "DBRefreshToken", back_populates="user", cascade="all, delete-orphan"
     )
