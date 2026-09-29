@@ -25,6 +25,7 @@ class UserResponse(BaseModel):
     subscription_status: str
     trial_ends_at: Optional[datetime] = None
     subscription_ends_at: Optional[datetime] = None
+    tt_image: Optional[str] = None
     class Config: from_attributes = True
 class TokenResponse(BaseModel):
     access_token: str
