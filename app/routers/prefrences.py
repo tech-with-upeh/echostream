@@ -7,6 +7,9 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.dependencies import get_current_user, get_db
 from app.models import DBAudioAsset, DBMutedUser, DBUser, DBUserPreferences
 from app.schemas import PreferencesSchema, EventAlertPreferenceSchema
+import logging
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter(tags=["Preferences"])
 _ALLOWED_EVENT_TYPES = {"follow", "like", "gift"}

@@ -129,3 +129,26 @@ async def create_voice_clone(title: str, description: str, tags: list[str], refe
             return payload
         except httpx.HTTPError as exc:
             raise FishAudioError(f"Fish Audio voice request failed: {exc}") from exc
+
+
+async def delete_voice_model(voice_id: str) -> None:
+    """Delete a Fish Audio voice model. A model that no longer exists counts as deleted."""
+    if not settings.FISH_AUDIO_API_KEY:
+        raise FishAudioError("Fish Audio is not configured. Set FISH_AUDIO_API_KEY.")
+    if not voice_id:
+        return
+    headers = {"Authorization": f"Bearer {settings.FISH_AUDIO_API_KEY}"}
+    async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
+        try:
+            response = await client.delete(
+                f"{settings.FISH_AUDIO_BASE_URL}/model/{voice_id}",
+                headers=headers,
+            )
+            if response.status_code == 404:
+                return
+            if response.status_code >= 400:
+                raise FishAudioError(
+                    f"Fish Audio voice delete failed ({response.status_code}): {response.text}"
+                )
+        except httpx.HTTPError as exc:
+            raise FishAudioError(f"Fish Audio voice delete request failed: {exc}") from exc

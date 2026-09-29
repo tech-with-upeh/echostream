@@ -20,6 +20,7 @@ from app.fish_audio import (
     create_voice_clone,
     list_public_voice_models,
     stream_tts,
+    delete_voice_model
 )
 from app.models import DBFishVoice, DBUser, DBUserPreferences
 from app.schemas import (
@@ -29,6 +30,10 @@ from app.schemas import (
     TTSVoiceCatalogSchema,
     VoiceDetailSchema,
 )
+
+import logging
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter(tags=["Text-to-Speech"])
 CACHED_VOICES: List[VoiceDetailSchema] = []
@@ -155,6 +160,75 @@ async def text_to_speech(
     )
 
 
+# @router.post("/v1/tts/fish/clone", response_model=FishVoiceCloneResponse)
+# async def clone_fish_voice(
+#     title: str = Form(...),
+#     description: str = Form(""),
+#     tags: str = Form(""),
+#     reference_text: str | None = Form(None),
+#     enhance_audio_quality: bool = Form(True),
+#     generate_sample: bool = Form(False),
+#     audio: list[UploadFile] = File(...),
+#     current_user: DBUser = Depends(require_pro_subscription),
+#     db: AsyncSession = Depends(get_db),
+# ):
+#     if not title.strip():
+#         raise HTTPException(status_code=400, detail="Voice title cannot be empty.")
+#     if len(audio) > 5:
+#         raise HTTPException(
+#             status_code=400, detail="You can upload at most 5 audio reference files."
+#         )
+#     audio_files = []
+#     for upload in audio:
+#         if not upload.content_type or not upload.content_type.startswith("audio/"):
+#             raise HTTPException(
+#                 status_code=400,
+#                 detail=f"{upload.filename or 'File'} is not an audio file.",
+#             )
+#         audio_files.append(
+#             (upload.filename or "reference_audio", upload.file, upload.content_type)
+#         )
+#     result = await db.execute(
+#         select(DBUserPreferences).where(DBUserPreferences.user_id == current_user.id)
+#     )
+#     prefs = result.scalar_one_or_none()
+#     if prefs is None:
+#         prefs = DBUserPreferences(user_id=current_user.id)
+#         db.add(prefs)
+#     try:
+#         payload = await create_voice_clone(
+#             title=title.strip(),
+#             description=description.strip(),
+#             tags=[tag.strip() for tag in tags.split(",") if tag.strip()],
+#             reference_text=reference_text.strip() if reference_text else None,
+#             audio_files=audio_files,
+#             enhance_audio_quality=enhance_audio_quality,
+#             generate_sample=generate_sample,
+#         )
+#     except FishAudioError as exc:
+#         raise HTTPException(status_code=502, detail=str(exc)) from exc
+#     voice_id = payload.get("_id")
+#     db.add(
+#         DBFishVoice(
+#             user_id=current_user.id,
+#             voice_id=voice_id,
+#             title=title.strip(),
+#             description=description.strip(),
+#             model=settings.FISH_AUDIO_PRO_MODEL,
+#             created_at=datetime.now(timezone.utc).replace(tzinfo=None),
+#         )
+#     )
+#     prefs.tts_provider = "fish"
+#     prefs.fish_voice_id = voice_id
+#     prefs.voice = voice_id
+#     await db.commit()
+#     await db.refresh(prefs)
+#     return FishVoiceCloneResponse(
+#         voice_id=voice_id,
+#         message="Voice cloned successfully and selected as your Fish Audio voice.",
+#     )
+
+
 @router.post("/v1/tts/fish/clone", response_model=FishVoiceCloneResponse)
 async def clone_fish_voice(
     title: str = Form(...),
@@ -190,6 +264,12 @@ async def clone_fish_voice(
     if prefs is None:
         prefs = DBUserPreferences(user_id=current_user.id)
         db.add(prefs)
+
+    old_result = await db.execute(
+        select(DBFishVoice).where(DBFishVoice.user_id == current_user.id)
+    )
+    old_voices = old_result.scalars().all()
+
     try:
         payload = await create_voice_clone(
             title=title.strip(),
@@ -203,6 +283,18 @@ async def clone_fish_voice(
     except FishAudioError as exc:
         raise HTTPException(status_code=502, detail=str(exc)) from exc
     voice_id = payload.get("_id")
+
+    # New clone succeeded — remove the user's previous clone(s)
+    for old in old_voices:
+        try:
+            await delete_voice_model(old.voice_id)
+        except FishAudioError:
+            logger.warning(
+                "Could not delete old Fish voice %s for user %s",
+                old.voice_id, current_user.id, exc_info=True,
+            )
+        await db.delete(old)
+
     db.add(
         DBFishVoice(
             user_id=current_user.id,
@@ -215,7 +307,7 @@ async def clone_fish_voice(
     )
     prefs.tts_provider = "fish"
     prefs.fish_voice_id = voice_id
-    prefs.voice = voice_id
+    prefs.voice = current_user.first_name
     await db.commit()
     await db.refresh(prefs)
     return FishVoiceCloneResponse(
