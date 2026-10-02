@@ -77,6 +77,15 @@ class Settings(BaseSettings):
     EXPO_ACCESS_TOKEN: str = ""
     EXPO_PUSH_URL: str = "https://exp.host/--/api/v2/push/send"
 
+    GROQ_API_KEY: str = ""
+    GROQ_BASE_URL: str = "https://api.groq.com/openai/v1"
+    GROQ_MODEL: str = "openai/gpt-oss-20b"
+    GROQ_TIMEOUT_SECONDS: float = 20.0
+    GROQ_TEMPERATURE: float = 0.2
+    GROQ_MAX_COMPLETION_TOKENS: int = 700
+
+    HELP_CHAT_RATE_LIMIT_PER_MINUTE: int = 20
+
 
 
 settings = Settings()
