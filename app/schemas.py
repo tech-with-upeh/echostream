@@ -422,3 +422,44 @@ class HelpArticleUpdate(BaseModel):
     sort_order: int | None = None
     is_featured: bool | None = None
     is_published: bool | None = None
+
+
+# ---------------------------------------------------------------------------
+# Help Chat
+# ---------------------------------------------------------------------------
+
+class HelpConversationCreate(BaseModel):
+    title: str | None = Field(default=None, max_length=120)
+
+
+class HelpConversationResponse(BaseModel):
+    id: str
+    title: str | None = None
+    status: str
+    last_message_at: datetime | None = None
+    created_at: datetime
+    updated_at: datetime
+
+    model_config = ConfigDict(from_attributes=True)
+
+
+class HelpMessageCreate(BaseModel):
+    content: str = Field(min_length=1, max_length=4000)
+
+
+class HelpMessageResponse(BaseModel):
+    id: int
+    role: str
+    content: str
+    model: str | None = None
+    provider: str | None = None
+    input_tokens: int | None = None
+    output_tokens: int | None = None
+    latency_ms: int | None = None
+    created_at: datetime
+
+    model_config = ConfigDict(from_attributes=True)
+
+
+class HelpConversationDetailResponse(HelpConversationResponse):
+    messages: list[HelpMessageResponse] = Field(default_factory=list)
