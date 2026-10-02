@@ -1,6 +1,7 @@
-from pydantic import BaseModel, EmailStr, Field
+from pydantic import BaseModel, EmailStr, Field, ConfigDict
 from datetime import datetime
 from typing import Literal, Optional
+ 
 
 class UserRegisterSchema(BaseModel):
     first_name: str
@@ -25,6 +26,7 @@ class UserResponse(BaseModel):
     subscription_status: str
     trial_ends_at: Optional[datetime] = None
     subscription_ends_at: Optional[datetime] = None
+    tt_image: Optional[str] = None
     class Config: from_attributes = True
 class TokenResponse(BaseModel):
     access_token: str
@@ -273,3 +275,150 @@ class FishVoiceCloneResponse(BaseModel):
     voice_id: str
     provider: str = "fish"
     message: str
+ 
+class DeviceRegisterSchema(BaseModel):
+    push_token: str
+    platform: Literal["ios", "android"]
+    app_version: str | None = None
+ 
+ 
+class NotificationDeviceResponse(BaseModel):
+    id: int
+    platform: str
+    is_active: bool
+ 
+    class Config:
+        from_attributes = True
+
+class TestNotificationSchema(BaseModel):
+    title: str = "Test notification"
+    body: str = "This is a test push from EchoStream."
+
+class NotificationPreferencesResponse(BaseModel):
+    push_enabled: bool
+    subscription_enabled: bool
+    streaming_reminders_enabled: bool
+    account_security_enabled: bool
+    product_updates_enabled: bool
+
+    class Config:
+        from_attributes = True
+
+
+class NotificationPreferencesUpdateSchema(BaseModel):
+    push_enabled: bool | None = None
+    subscription_enabled: bool | None = None
+    streaming_reminders_enabled: bool | None = None
+    account_security_enabled: bool | None = None
+    product_updates_enabled: bool | None = None
+
+
+# ---------------------------------------------------------------------------
+# Help Center
+# ---------------------------------------------------------------------------
+
+class HelpCategoryBase(BaseModel):
+    slug: str
+    title: str
+    description: str
+    icon: str
+    sort_order: int = 0
+
+
+class HelpCategoryResponse(HelpCategoryBase):
+    id: int
+    article_count: int = 0
+
+    model_config = ConfigDict(from_attributes=True)
+
+
+class HelpCategoryDetailResponse(HelpCategoryResponse):
+    articles: list["HelpArticleSummaryResponse"] = []
+
+
+class HelpArticleBase(BaseModel):
+    slug: str
+    title: str
+    excerpt: str | None = None
+    content: str
+    icon: str | None = None
+    tags: list[str] = []
+    search_keywords: str | None = None
+    sort_order: int = 0
+
+
+class HelpArticleSummaryResponse(BaseModel):
+    id: int
+    slug: str
+    title: str
+    excerpt: str | None = None
+    icon: str | None = None
+    category_slug: str
+    category_title: str
+    is_featured: bool = False
+
+    model_config = ConfigDict(from_attributes=True)
+
+
+class HelpArticleResponse(HelpArticleBase):
+    id: int
+    category_id: int
+    category_slug: str
+    category_title: str
+    is_featured: bool
+    is_published: bool
+    created_at: datetime
+    updated_at: datetime
+    published_at: datetime | None = None
+
+    model_config = ConfigDict(from_attributes=True)
+
+
+class HelpSearchResponse(BaseModel):
+    results: list[HelpArticleSummaryResponse]
+    query: str
+    total: int
+
+class HelpCategoryCreate(BaseModel):
+    slug: str
+    title: str
+    description: str
+    icon: str
+    sort_order: int = 0
+
+
+class HelpCategoryUpdate(BaseModel):
+    slug: str | None = None
+    title: str | None = None
+    description: str | None = None
+    icon: str | None = None
+    sort_order: int | None = None
+    is_active: bool | None = None
+
+
+class HelpArticleCreate(BaseModel):
+    category_id: int
+    slug: str
+    title: str
+    excerpt: str | None = None
+    content: str
+    icon: str | None = None
+    tags: list[str] = []
+    search_keywords: str | None = None
+    sort_order: int = 0
+    is_featured: bool = False
+    is_published: bool = False
+
+
+class HelpArticleUpdate(BaseModel):
+    category_id: int | None = None
+    slug: str | None = None
+    title: str | None = None
+    excerpt: str | None = None
+    content: str | None = None
+    icon: str | None = None
+    tags: list[str] | None = None
+    search_keywords: str | None = None
+    sort_order: int | None = None
+    is_featured: bool | None = None
+    is_published: bool | None = None

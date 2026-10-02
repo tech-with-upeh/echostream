@@ -198,6 +198,16 @@ async def start_tiktok_session(user_id, tiktok_username):
         if old:
             old.cancel()
         _warmup_tasks[user_id] = asyncio.create_task(finish())
+        async with AsyncSessionLocal() as db:
+            stream_user = (
+                await db.execute(
+                    select(DBUser).where(DBUser.id == user_id)
+                )
+            ).scalar_one_or_none()
+
+            if stream_user is not None:
+                stream_user.last_stream_at = datetime.now(timezone.utc)
+                await db.commit()
         print(f"[live] connected user_id={user_id} instance={INSTANCE_ID}")
 
     @client.on(CommentEvent)

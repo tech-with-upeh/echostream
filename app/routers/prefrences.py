@@ -17,6 +17,33 @@ FREE_GIFT_ALERT_LIMIT = (
     3  # specific-gift alerts on the starter plan; "any gift"/like/follow don't count
 )
 
+# Fields that live directly on DBUserPreferences and can be partially updated.
+_SIMPLE_FIELDS = [
+    "tiktok_username",
+    "tts_provider",
+    "voice",
+    "fish_voice_id",
+    "fish_model",
+    "pitch",
+    "volume",
+    "speed",
+    "emoji_to_words",
+    "filter_profanity",
+    "require_command_prefix",
+    "max_message_length",
+    "comment_speech_enabled",
+    "comment_speech_template",
+    "minimum_account_age_days",
+    "spam_protection_enabled",
+    "block_repeated_words",
+    "auto_mute_repeat_offenders",
+    "spam_cooldown_seconds",
+    "spam_max_requests_per_minute",
+]
+
+# Fields that are stored as JSON strings and need special handling.
+_JSON_FIELDS = {"allowed_user_types", "blocked_words"}
+
 
 def _parse_list(value, default):
     try:
@@ -177,54 +204,58 @@ async def update_preferences(
     prefs = await _get_or_create_preferences(current_user, db)
     plan = current_user.plan.lower()
     is_pro = plan == "pro"
-    if payload.tts_provider == "fish" and not is_pro:
+
+    # Only fields the client actually included in the request body are
+    # considered "provided". Anything omitted falls back to Pydantic
+    # defaults on `payload`, but we must never let those defaults overwrite
+    # a field the client didn't intend to touch — that was the root cause
+    # of partial updates (e.g. toggling a spam setting) silently reverting
+    # unrelated fields (e.g. the selected cloned voice) back to defaults.
+    provided = payload.model_dump(exclude_unset=True)
+
+    if provided.get("tts_provider") == "fish" and not is_pro:
         raise HTTPException(403, "Fish Audio is available on the Pro plan.")
-    if not is_pro and any(
-        [
-            payload.emoji_to_words,
-            payload.filter_profanity,
-            payload.require_command_prefix,
-            payload.minimum_account_age_days != 1,
-            bool(payload.blocked_words),
-            payload.spam_protection_enabled,
-            not payload.block_repeated_words,
-            payload.auto_mute_repeat_offenders,
-            payload.spam_cooldown_seconds != 2,
-            payload.spam_max_requests_per_minute != 10,
-        ]
-    ):
-        raise HTTPException(
-            403,
-            "These advanced TTS and spam-protection settings are available on the Pro plan.",
+
+    # Plan-gated advanced settings: only enforce the check against fields
+    # that were actually part of this request.
+    pro_only_checks = {
+        "emoji_to_words": lambda v: bool(v),
+        "filter_profanity": lambda v: bool(v),
+        "require_command_prefix": lambda v: bool(v),
+        "minimum_account_age_days": lambda v: v != 1,
+        "blocked_words": lambda v: bool(v),
+        "spam_protection_enabled": lambda v: bool(v),
+        "block_repeated_words": lambda v: not v,
+        "auto_mute_repeat_offenders": lambda v: bool(v),
+        "spam_cooldown_seconds": lambda v: v != 2,
+        "spam_max_requests_per_minute": lambda v: v != 10,
+    }
+    if not is_pro:
+        violates = any(
+            check(provided[field])
+            for field, check in pro_only_checks.items()
+            if field in provided
         )
-    events = await _normalise_events(payload.events, current_user, db)
-    fields = [
-        "tiktok_username",
-        "tts_provider",
-        "voice",
-        "fish_voice_id",
-        "fish_model",
-        "pitch",
-        "volume",
-        "speed",
-        "emoji_to_words",
-        "filter_profanity",
-        "require_command_prefix",
-        "max_message_length",
-        "comment_speech_enabled",
-        "comment_speech_template",
-        "minimum_account_age_days",
-        "spam_protection_enabled",
-        "block_repeated_words",
-        "auto_mute_repeat_offenders",
-        "spam_cooldown_seconds",
-        "spam_max_requests_per_minute",
-    ]
-    for field in fields:
-        setattr(prefs, field, getattr(payload, field))
-    prefs.event_alerts = json.dumps(events)
-    prefs.allowed_user_types = json.dumps(payload.allowed_user_types)
-    prefs.blocked_words = json.dumps(payload.blocked_words)
+        if violates:
+            raise HTTPException(
+                403,
+                "These advanced TTS and spam-protection settings are available on the Pro plan.",
+            )
+
+    for field in _SIMPLE_FIELDS:
+        if field in provided:
+            setattr(prefs, field, provided[field])
+
+    if "events" in provided:
+        events = await _normalise_events(payload.events, current_user, db)
+        prefs.event_alerts = json.dumps(events)
+
+    if "allowed_user_types" in provided:
+        prefs.allowed_user_types = json.dumps(provided["allowed_user_types"])
+
+    if "blocked_words" in provided:
+        prefs.blocked_words = json.dumps(provided["blocked_words"])
+
     await db.commit()
     await db.refresh(prefs)
     return _serialize(prefs)

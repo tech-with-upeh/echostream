@@ -350,6 +350,38 @@ async def upload_generic_gift_image(
     )
 
 
+async def upload_tiktok_image(
+    file_bytes: bytes,
+    *,
+    user_id: int,
+) -> str:
+    extension, content_type = _detect_image_type(file_bytes)
+    key = f"tt-images/{user_id}/{uuid4().hex}.{extension}"
+
+    await asyncio.to_thread(
+        _put_object,
+        key,
+        file_bytes,
+        content_type,
+    )
+
+    return f"{settings.R2_PUBLIC_BASE_URL.rstrip('/')}/{key}"
+
+
+async def delete_tiktok_image(url: str, *, user_id: int) -> None:
+    key = _key_from_url(url)
+
+    if not key.startswith(f"tt-images/{user_id}/"):
+        raise R2StorageError(
+            "Refusing to delete a TikTok image that does not belong to the user."
+        )
+
+    await asyncio.to_thread(
+        _delete_object,
+        key,
+    )
+
+
 async def delete_audio_key(key: str) -> None:
     await asyncio.to_thread(
         _delete_object,

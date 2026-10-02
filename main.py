@@ -5,10 +5,11 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from app.gift_catalog import gift_catalog_scheduler
 from app.live_runtime import command_listener, owner_heartbeat
+from app.notifications.service import notification_scheduler
 from app.rate_limit import RedisRateLimitMiddleware
 from app.redis_store import close_redis, ping_redis
 from app.paystack_service import close_paystack_client
-from app.routers import auth, gifts, live, payments, payment_receipts, payment_reconciliation, prefrences, subscription_changes, upgrade, upgrade_voucher, voice, wstts, sounds, redeem
+from app.routers import auth, gifts, live, notifications, payments, payment_receipts, payment_reconciliation, prefrences, subscription_changes, upgrade, upgrade_voucher, voice, wstts, sounds, redeem, tiktok_profile, userHelp, adminHelp
 import app.models
 
 import logging
@@ -24,18 +25,19 @@ async def lifespan(app: FastAPI):
 
     runtime_stop = asyncio.Event()
 
-    gift_sync_task = asyncio.create_task(gift_catalog_scheduler(runtime_stop))
+    #gift_sync_task = asyncio.create_task(gift_catalog_scheduler(runtime_stop))
     command_task = asyncio.create_task(command_listener(runtime_stop))
     heartbeat_task = asyncio.create_task(owner_heartbeat(runtime_stop))
+    notification_task = asyncio.create_task(notification_scheduler(runtime_stop))
 
     try:
         yield
     finally:
         runtime_stop.set()
-        for task in (command_task, heartbeat_task, gift_sync_task):
+        for task in (command_task, heartbeat_task,  notification_task): #gift_sync_task,
             task.cancel()
         await asyncio.gather(
-            command_task, heartbeat_task, gift_sync_task,
+            command_task, heartbeat_task,  notification_task, #gift_sync_task,
             return_exceptions=True,
         )
         await close_redis()
@@ -59,6 +61,7 @@ app.add_middleware(
 app.add_middleware(RedisRateLimitMiddleware)
 
 app.include_router(auth.router)
+app.include_router(tiktok_profile.router)
 app.include_router(voice.router)
 app.include_router(wstts.router)
 app.include_router(live.router)
@@ -66,20 +69,17 @@ app.include_router(prefrences.router)
 app.include_router(gifts.router)
 app.include_router(sounds.router)
 app.include_router(redeem.router)
-# Voucher-aware upgrade routes must be registered before the generic upgrade
-# routes so the optional voucher_code query parameter is handled by the
-# authoritative voucher-aware quote/upgrade state machine.
 app.include_router(upgrade_voucher.router)
-# Register upgrade routes before the generic payment callback/verify/webhook
-# routes so upgrade transactions always use the upgrade state machine.
 app.include_router(upgrade.router)
-# Register reconciliation routes before the generic payments routes.
 app.include_router(payment_reconciliation.router)
 app.include_router(payments.router)
 app.include_router(payment_receipts.router)
 app.include_router(subscription_changes.router)
-
+app.include_router(notifications.router)
+app.include_router(userHelp.router)
+app.include_router(adminHelp.router)
 
 @app.get("/")
 def health_check():
     return {"status": "healthy"}
+
