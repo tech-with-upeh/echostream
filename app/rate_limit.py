@@ -39,6 +39,8 @@ class RedisRateLimitMiddleware(BaseHTTPMiddleware):
         }
         if path in auth_paths:
             return "auth", settings.RATE_LIMIT_AUTH_PER_MINUTE
+        if path.startswith("/help/chat"):
+            return "help-chat", settings.HELP_CHAT_RATE_LIMIT_PER_MINUTE
         if path == "/v1/tts":
             return "tts", settings.RATE_LIMIT_TTS_PER_MINUTE
         if path == "/v1/tts/fish/clone":
