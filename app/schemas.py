@@ -1,6 +1,7 @@
 from pydantic import BaseModel, EmailStr, Field
 from datetime import datetime
 from typing import Literal, Optional
+ 
 
 class UserRegisterSchema(BaseModel):
     first_name: str
@@ -274,3 +275,39 @@ class FishVoiceCloneResponse(BaseModel):
     voice_id: str
     provider: str = "fish"
     message: str
+ 
+class DeviceRegisterSchema(BaseModel):
+    push_token: str
+    platform: Literal["ios", "android"]
+    app_version: str | None = None
+ 
+ 
+class NotificationDeviceResponse(BaseModel):
+    id: int
+    platform: str
+    is_active: bool
+ 
+    class Config:
+        from_attributes = True
+
+class TestNotificationSchema(BaseModel):
+    title: str = "Test notification"
+    body: str = "This is a test push from EchoStream."
+
+class NotificationPreferencesResponse(BaseModel):
+    push_enabled: bool
+    subscription_enabled: bool
+    streaming_reminders_enabled: bool
+    account_security_enabled: bool
+    product_updates_enabled: bool
+
+    class Config:
+        from_attributes = True
+
+
+class NotificationPreferencesUpdateSchema(BaseModel):
+    push_enabled: bool | None = None
+    subscription_enabled: bool | None = None
+    streaming_reminders_enabled: bool | None = None
+    account_security_enabled: bool | None = None
+    product_updates_enabled: bool | None = None

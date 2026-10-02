@@ -74,5 +74,9 @@ class Settings(BaseSettings):
     GIFT_CATALOG_SYNC_INTERVAL_HOURS: int = 24
     GIFT_CATALOG_STALE_AFTER_HOURS: int = 48
 
+    EXPO_ACCESS_TOKEN: str = ""
+    EXPO_PUSH_URL: str = "https://exp.host/--/api/v2/push/send"
+
+
 
 settings = Settings()

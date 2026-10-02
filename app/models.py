@@ -81,6 +81,16 @@ class DBUser(Base):
         cascade="all, delete-orphan",
         order_by="desc(DBPaymentHistory.paid_at)",
     )
+    notification_devices = relationship(
+        "DBNotificationDevice", back_populates="user", cascade="all, delete-orphan"
+    )
+    notifications = relationship(
+        "DBNotification", back_populates="user", cascade="all, delete-orphan"
+    )
+    notification_preference = relationship(
+        "DBNotificationPreference", back_populates="user", uselist=False,
+        cascade="all, delete-orphan"
+    )
 
 
 class DBAudioAsset(Base):
@@ -346,3 +356,57 @@ class DBMutedUser(Base):
     reason = Column(String, nullable=False, default="manual")
     created_at = Column(UTCDateTime, nullable=False)
     owner = relationship("DBUser", back_populates="muted_users")
+
+class DBNotificationDevice(Base):
+    __tablename__ = "notification_devices"
+    __table_args__ = (UniqueConstraint("push_token"),)
+    id = Column(Integer, primary_key=True, index=True)
+    user_id = Column(
+        Integer, ForeignKey("users.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    push_token = Column(String, nullable=False, index=True)
+    platform = Column(String, nullable=False)  # "ios" | "android"
+    is_active = Column(Boolean, nullable=False, default=True, index=True)
+    app_version = Column(String, nullable=True)
+    last_seen_at = Column(UTCDateTime, nullable=True)
+    created_at = Column(UTCDateTime, nullable=False)
+    updated_at = Column(UTCDateTime, nullable=False)
+    user = relationship("DBUser", back_populates="notification_devices")
+
+
+class DBNotification(Base):
+    __tablename__ = "notifications"
+    id = Column(Integer, primary_key=True, index=True)
+    user_id = Column(
+        Integer, ForeignKey("users.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    type = Column(String, nullable=False, index=True)
+    title = Column(String, nullable=False)
+    body = Column(Text, nullable=False)
+    data = Column(Text, nullable=True)  # JSON-encoded payload, matches metadata_json style
+    read_at = Column(UTCDateTime, nullable=True)
+    created_at = Column(UTCDateTime, nullable=False, index=True)
+    user = relationship("DBUser", back_populates="notifications")
+
+class DBNotificationPreference(Base):
+    __tablename__ = "notification_preferences"
+    id = Column(Integer, primary_key=True, index=True)
+    user_id = Column(
+        Integer,
+        ForeignKey("users.id", ondelete="CASCADE"),
+        unique=True,
+        nullable=False,
+        index=True,
+    )
+    push_enabled = Column(Boolean, nullable=False, default=True)
+    subscription_enabled = Column(Boolean, nullable=False, default=True)
+    streaming_reminders_enabled = Column(Boolean, nullable=False, default=True)
+    account_security_enabled = Column(Boolean, nullable=False, default=True)
+    product_updates_enabled = Column(Boolean, nullable=False, default=True)
+    created_at = Column(UTCDateTime, nullable=False)
+    updated_at = Column(UTCDateTime, nullable=False)
+    user = relationship("DBUser", back_populates="notification_preference")
+
+
+# --- Add to DBUser, alongside the other relationships: ---
+#
