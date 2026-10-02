@@ -15,6 +15,7 @@ async def _get_preferences(user_id: int, db: AsyncSession) -> DBUserPreferences 
     return result.scalar_one_or_none()
 
 
+
 @router.post("/v1/live/start")
 async def go_live(current_user: DBUser = Depends(get_current_user), db: AsyncSession = Depends(get_db)):
     prefs = await _get_preferences(current_user.id, db)

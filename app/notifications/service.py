@@ -52,6 +52,8 @@ _EXPIRY_REMINDERS = [
     ),
 ]
 
+_STREAM_REMINDER_AFTER_DAYS = 7
+
 
 # Maps a notification `type` string to the preference column that gates it.
 # Types not listed here (e.g. "test") always send. account_security is listed
@@ -270,6 +272,67 @@ class NotificationService:
         )
         return sent_count
 
+    async def check_streaming_reminders(self, db: AsyncSession) -> int:
+        now_utc = datetime.now(timezone.utc)
+
+        cutoff = now_utc - timedelta(
+            days=_STREAM_REMINDER_AFTER_DAYS
+        )
+
+        result = await db.execute(
+            select(DBUser).where(
+                DBUser.is_active.is_(True),
+                DBUser.last_stream_at.isnot(None),
+                DBUser.last_stream_at <= cutoff,
+            )
+        )
+
+        users = result.scalars().all()
+        sent_count = 0
+
+        for user in users:
+            last_stream_at = user.last_stream_at
+
+            if last_stream_at.tzinfo is None:
+                last_stream_at = last_stream_at.replace(
+                    tzinfo=timezone.utc
+                )
+
+            idempotency_key = (
+                f"notif:streaming-reminder:"
+                f"{user.id}:"
+                f"{last_stream_at.isoformat()}"
+            )
+
+            if not await self._claim_idempotency_key(idempotency_key):
+                continue
+
+            notification = await self.send(
+                db,
+                user_id=user.id,
+                type="streaming_reminder",
+                title="Time to go live?",
+                body=(
+                    f"You haven't streamed in "
+                    f"{_STREAM_REMINDER_AFTER_DAYS} days. "
+                    "Your audience might be waiting for you!"
+                ),
+                data={
+                    "screen": "live",
+                },
+            )
+
+            if notification is not None:
+                sent_count += 1
+
+        logger.info(
+            "check_streaming_reminders: %s candidate(s), %s sent",
+            len(users),
+            sent_count,
+        )
+
+        return sent_count
+
 
 notification_service = NotificationService()
 
@@ -282,6 +345,7 @@ async def notification_scheduler(stop_event: asyncio.Event) -> None:
             async with AsyncSessionLocal() as db:
                 await notification_service.check_subscription_expiry_reminders(db)
                 await notification_service.check_subscription_expired(db)
+                await notification_service.check_streaming_reminders(db)
         except Exception:
             logger.exception("notification_scheduler: check failed")
         try:
