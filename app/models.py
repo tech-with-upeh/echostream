@@ -10,6 +10,7 @@ from sqlalchemy import (
     Text,
     UniqueConstraint,
     event,
+    JSON
 )
 from sqlalchemy.orm import relationship
 from app.database import Base
@@ -408,6 +409,57 @@ class DBNotificationPreference(Base):
     updated_at = Column(UTCDateTime, nullable=False)
     user = relationship("DBUser", back_populates="notification_preference")
 
+class DBHelpCategory(Base):
+    __tablename__ = "help_categories"
 
-# --- Add to DBUser, alongside the other relationships: ---
-#
+    id = Column(Integer, primary_key=True)
+    slug = Column(String, unique=True, nullable=False, index=True)
+    title = Column(String, nullable=False)
+    description = Column(Text, nullable=False)
+    icon = Column(String, nullable=False)
+    sort_order = Column(Integer, nullable=False, default=0)
+    is_active = Column(Boolean, nullable=False, default=True)
+
+    created_at = Column(UTCDateTime, nullable=False)
+    updated_at = Column(UTCDateTime, nullable=False)
+
+    articles = relationship(
+        "DBHelpArticle",
+        back_populates="category",
+        cascade="all, delete-orphan",
+    )
+
+class DBHelpArticle(Base):
+    __tablename__ = "help_articles"
+
+    id = Column(Integer, primary_key=True)
+
+    category_id = Column(
+        Integer,
+        ForeignKey("help_categories.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+
+    slug = Column(String, unique=True, nullable=False, index=True)
+    title = Column(String, nullable=False)
+    excerpt = Column(Text, nullable=True)
+
+    content = Column(Text, nullable=False)
+
+    icon = Column(String, nullable=True)
+
+    is_featured = Column(Boolean, nullable=False, default=False)
+    is_published = Column(Boolean, nullable=False, default=False)
+    tags = Column(JSON, nullable=True)
+    search_keywords = Column(Text, nullable=True)
+    sort_order = Column(Integer, nullable=False, default=0)
+
+    created_at = Column(UTCDateTime, nullable=False)
+    updated_at = Column(UTCDateTime, nullable=False)
+    published_at = Column(UTCDateTime, nullable=True)
+
+    category = relationship(
+        "DBHelpCategory",
+        back_populates="articles",
+    )

@@ -9,7 +9,7 @@ from app.notifications.service import notification_scheduler
 from app.rate_limit import RedisRateLimitMiddleware
 from app.redis_store import close_redis, ping_redis
 from app.paystack_service import close_paystack_client
-from app.routers import auth, gifts, live, notifications, payments, payment_receipts, payment_reconciliation, prefrences, subscription_changes, upgrade, upgrade_voucher, voice, wstts, sounds, redeem, tiktok_profile
+from app.routers import auth, gifts, live, notifications, payments, payment_receipts, payment_reconciliation, prefrences, subscription_changes, upgrade, upgrade_voucher, voice, wstts, sounds, redeem, tiktok_profile, userHelp, adminHelp
 import app.models
 
 import logging
@@ -76,6 +76,8 @@ app.include_router(payments.router)
 app.include_router(payment_receipts.router)
 app.include_router(subscription_changes.router)
 app.include_router(notifications.router)
+app.include_router(userHelp.router)
+app.include_router(adminHelp.router)
 
 @app.get("/")
 def health_check():
