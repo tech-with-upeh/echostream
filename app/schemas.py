@@ -463,3 +463,20 @@ class HelpMessageResponse(BaseModel):
 
 class HelpConversationDetailResponse(HelpConversationResponse):
     messages: list[HelpMessageResponse] = Field(default_factory=list)
+
+
+# Help Chat AI
+
+class HelpSourceResponse(BaseModel):
+    id: int
+    slug: str
+    title: str
+    category_slug: str
+    category_title: str
+
+
+class HelpChatResponse(BaseModel):
+    user_message: HelpMessageResponse
+    assistant_message: HelpMessageResponse
+    sources: list[HelpSourceResponse] = Field(default_factory=list)
+    needs_human_support: bool = False
