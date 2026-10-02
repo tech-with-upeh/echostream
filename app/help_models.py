@@ -52,4 +52,4 @@ class DBHelpMessage(Base):
     latency_ms = Column(Integer, nullable=True)
     created_at = Column(UTCDateTime, nullable=False, index=True)
 
-    conversation = relationship("DBHelpConversation", back_popates="messages")
+    conversation = relationship("DBHelpConversation", back_populates="messages")
