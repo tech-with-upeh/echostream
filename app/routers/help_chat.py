@@ -76,6 +76,7 @@ async def create_conversation(
 ):
     now = _now()
     title = payload.title.strip() if payload.title else None
+
     conversation = DBHelpConversation(
         user_id=current_user.id,
         title=title or None,
@@ -83,16 +84,26 @@ async def create_conversation(
         created_at=now,
         updated_at=now,
     )
+
     session.add(conversation)
+
     await session.commit()
     await session.refresh(conversation)
-    return conversation
+
+    return HelpConversationResponse(
+        id=conversation.public_id,
+        title=conversation.title,
+        status=conversation.status,
+        last_message_at=conversation.last_message_at,
+        created_at=conversation.created_at,
+        updated_at=conversation.updated_at,
+    )
 
 
 @router.get("/conversations", response_model=list[HelpConversationResponse])
 async def list_conversations(
     current_user: DBUser = Depends(get_current_user),
-    session: AsyncSession = Depends(__import__("app.dependencies", fromlist=["get_db"]).get_db),
+    session: AsyncSession = Depends(get_db),
 ):
     result = await session.execute(
         select(DBHelpConversation)
@@ -102,7 +113,20 @@ async def list_conversations(
             DBHelpConversation.created_at.desc(),
         )
     )
-    return list(result.scalars().all())
+
+    conversations = result.scalars().all()
+
+    return [
+        HelpConversationResponse(
+            id=conversation.public_id,
+            title=conversation.title,
+            status=conversation.status,
+            last_message_at=conversation.last_message_at,
+            created_at=conversation.created_at,
+            updated_at=conversation.updated_at,
+        )
+        for conversation in conversations
+    ]
 
 
 @router.get(

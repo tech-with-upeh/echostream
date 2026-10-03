@@ -2,11 +2,11 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from sqlalchemy import Float, case, func, literal, select
+from sqlalchemy import Float, case, func, literal, literal_column, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.help_models import DBHelpArticle, DBHelpCategory
-
+#from app.help_models import DBHelpArticle, DBHelpCategory
+from app.models import DBHelpArticle, DBHelpCategory    
 
 @dataclass(frozen=True)
 class HelpRetrievalResult:
@@ -22,10 +22,40 @@ class HelpRetrievalResult:
 
 def _document():
     return (
-        func.setweight(func.to_tsvector("english", func.coalesce(DBHelpArticle.title, "")), "A")
-        .op("||")(func.setweight(func.to_tsvector("english", func.coalesce(DBHelpArticle.search_keywords, "")), "A"))
-        .op("||")(func.setweight(func.to_tsvector("english", func.coalesce(DBHelpArticle.excerpt, "")), "B"))
-        .op("||")(func.setweight(func.to_tsvector("english", func.coalesce(DBHelpArticle.content, "")), "C"))
+        func.setweight(
+            func.to_tsvector(
+                "english",
+                func.coalesce(DBHelpArticle.title, ""),
+            ),
+            literal_column("'A'"),
+        )
+        .op("||")(
+            func.setweight(
+                func.to_tsvector(
+                    "english",
+                    func.coalesce(DBHelpArticle.search_keywords, ""),
+                ),
+                literal_column("'A'"),
+            )
+        )
+        .op("||")(
+            func.setweight(
+                func.to_tsvector(
+                    "english",
+                    func.coalesce(DBHelpArticle.excerpt, ""),
+                ),
+                literal_column("'B'"),
+            )
+        )
+        .op("||")(
+            func.setweight(
+                func.to_tsvector(
+                    "english",
+                    func.coalesce(DBHelpArticle.content, ""),
+                ),
+                literal_column("'C'"),
+            )
+        )
     )
 
 
